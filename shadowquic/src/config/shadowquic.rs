@@ -1,15 +1,123 @@
 use std::net::SocketAddr;
 
-use serde::Deserialize;
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer};
+use std::fmt;
 
 use crate::config::{
-    AuthUser, CongestionControl, default_alpn, default_congestion_control, default_gso,
-    default_initial_mtu, default_keep_alive_interval, default_min_mtu, default_mtu_discovery,
-    default_over_stream, default_zero_rtt,
+    AuthUser, CongestionControl, default_alpn, default_brutal_ack_compensate,
+    default_brutal_cwnd_gain, default_brutal_down, default_brutal_up, default_congestion_control,
+    default_gso, default_initial_mtu, default_keep_alive_interval, default_min_mtu,
+    default_mtu_discovery, default_over_stream, default_zero_rtt,
 };
 
 pub fn default_rate_limit() -> u64 {
     u64::MAX
+}
+
+pub fn parse_bps(input: &str) -> Result<u64, String> {
+    let s = input.trim();
+
+    if s.is_empty() {
+        return Err("empty bandwidth string".to_string());
+    }
+
+    let (num_str, multiplier) = match s.as_bytes().last().copied() {
+        Some(b'K') | Some(b'k') => (&s[..s.len() - 1], 1024f64),
+        Some(b'M') | Some(b'm') => (&s[..s.len() - 1], 1024f64 * 1024f64),
+        Some(b'G') | Some(b'g') => (&s[..s.len() - 1], 1024f64 * 1024f64 * 1024f64),
+        Some(b'0'..=b'9') => (s, 1f64),
+        _ => return Err(format!("invalid bandwidth suffix: {input}")),
+    };
+
+    let value: f64 = num_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid bandwidth number: {input}"))?;
+
+    if !value.is_finite() {
+        return Err(format!("invalid bandwidth number: {input}"));
+    }
+
+    if value < 0.0 {
+        return Err(format!("bandwidth must be non-negative: {input}"));
+    }
+
+    let result = value * multiplier;
+
+    if result > u64::MAX as f64 {
+        return Err(format!("bandwidth value overflow: {input}"));
+    }
+
+    Ok(result.round() as u64)
+}
+
+pub fn deserialize_bps<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BpsVisitor;
+
+    impl<'de> Visitor<'de> for BpsVisitor {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("an integer bps value or a string like \"30M\" or \"1.5G\"")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value)
+        }
+
+        fn visit_u32<E>(self, value: u32) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value as u64)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value < 0 {
+                return Err(E::custom("bandwidth must be non-negative"));
+            }
+            Ok(value as u64)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            parse_bps(value).map_err(E::custom)
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            parse_bps(&value).map_err(E::custom)
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if !value.is_finite() {
+                return Err(E::custom("bandwidth must be finite"));
+            }
+            if value < 0.0 {
+                return Err(E::custom("bandwidth must be non-negative"));
+            }
+            Ok(value.round() as u64)
+        }
+    }
+
+    deserializer.deserialize_any(BpsVisitor)
 }
 
 /// Configuration of shadowquic inbound
@@ -70,6 +178,10 @@ pub struct ShadowQuicServerCfg {
     /// For stable udp network, it's better to disable it and set a proper initial mtu
     #[serde(default = "default_mtu_discovery")]
     pub mtu_discovery: bool,
+
+    /// Brutal server configuration
+    #[serde(default)]
+    pub brutal: Option<BrutalParams>,
 }
 
 /// Jls upstream configuration
@@ -105,6 +217,7 @@ impl Default for ShadowQuicServerCfg {
             server_name: None,
             gso: default_gso(),
             mtu_discovery: default_mtu_discovery(),
+            brutal: None,
         }
     }
 }
@@ -127,6 +240,29 @@ impl Default for ShadowQuicClientCfg {
             mtu_discovery: default_mtu_discovery(),
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
+            brutal: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct BrutalParams {
+    #[serde(deserialize_with = "deserialize_bps")]
+    pub up: u64,
+    #[serde(deserialize_with = "deserialize_bps")]
+    pub down: u64,
+    pub cwnd_gain: f64,
+    pub ack_compensate: bool,
+}
+
+impl Default for BrutalParams {
+    fn default() -> Self {
+        Self {
+            up: default_brutal_up(),
+            down: default_brutal_down(),
+            cwnd_gain: default_brutal_cwnd_gain(),
+            ack_compensate: default_brutal_ack_compensate(),
         }
     }
 }
@@ -200,4 +336,8 @@ pub struct ShadowQuicClientCfg {
     #[cfg(target_os = "android")]
     #[serde(default)]
     pub protect_path: Option<std::path::PathBuf>,
+
+    /// Brutal client configuration
+    #[serde(default)]
+    pub brutal: Option<BrutalParams>,
 }

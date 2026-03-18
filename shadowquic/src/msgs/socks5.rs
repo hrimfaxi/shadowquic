@@ -244,3 +244,57 @@ impl SEncode for u16 {
         Ok(())
     }
 }
+
+#[async_trait::async_trait]
+impl SDecode for u64 {
+    async fn decode<T: AsyncRead + Unpin + Send>(s: &mut T) -> Result<Self, SError> {
+        let mut buf = [0u8; 8];
+        s.read_exact(&mut buf).await?;
+        Ok(u64::from_be_bytes(buf))
+    }
+}
+
+#[async_trait::async_trait]
+impl SEncode for u64 {
+    async fn encode<T: AsyncWrite + Unpin + Send>(&self, s: &mut T) -> Result<(), SError> {
+        s.write_all(&self.to_be_bytes()).await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SDecode for f64 {
+    async fn decode<T: AsyncRead + Unpin + Send>(s: &mut T) -> Result<Self, SError> {
+        let mut buf = [0u8; 8];
+        s.read_exact(&mut buf).await?;
+        Ok(f64::from_be_bytes(buf))
+    }
+}
+
+#[async_trait::async_trait]
+impl SEncode for f64 {
+    async fn encode<T: AsyncWrite + Unpin + Send>(&self, s: &mut T) -> Result<(), SError> {
+        s.write_all(&self.to_be_bytes()).await?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SDecode for bool {
+    async fn decode<T: AsyncRead + Unpin + Send>(s: &mut T) -> Result<Self, SError> {
+        let val = u16::decode(s).await?;
+        match val {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(SError::ProtocolViolation),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SEncode for bool {
+    async fn encode<T: AsyncWrite + Unpin + Send>(&self, s: &mut T) -> Result<(), SError> {
+        let val: u16 = if *self { 1 } else { 0 };
+        val.encode(s).await
+    }
+}

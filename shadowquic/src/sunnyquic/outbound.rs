@@ -6,16 +6,20 @@ use std::{
 use tokio::sync::{OnceCell, SetOnce};
 
 use super::EndClient;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::{
     Outbound,
-    config::SunnyQuicClientCfg,
+    config::{CongestionControl, SunnyQuicClientCfg},
     error::SError,
+    msgs::SEncode,
+    msgs::squic::SQReq,
     quic::{QuicClient, QuicConnection},
     squic::{auth_sunny, outbound::handle_request},
     sunnyquic::gen_sunny_user_hash,
 };
+
+use crate::msgs::squic::BrutalNegotiation;
 
 use crate::squic::{IDStore, SQConn, handle_udp_packet_recv};
 
@@ -26,6 +30,19 @@ pub struct SunnyQuicClient {
     pub config: SunnyQuicClientCfg,
     pub quic_end: OnceCell<EndClient>,
 }
+
+pub(crate) async fn negotiate_brutal_sunny<T: QuicConnection>(
+    conn: &SQConn<T>,
+    negotiation: BrutalNegotiation,
+) -> Result<(), SError> {
+    let (mut send, _recv, _id) = conn.open_bi().await?;
+    SQReq::SQBrutalNegotiation(negotiation)
+        .encode(&mut send)
+        .await?;
+    debug!("brutal negotiation request sent");
+    Ok(())
+}
+
 impl SunnyQuicClient {
     pub fn new(cfg: SunnyQuicClientCfg) -> Self {
         Self {
@@ -79,11 +96,28 @@ impl SunnyQuicClient {
 
         let username = self.config.username.clone();
         let password = self.config.password.clone();
+        let brutal = self.config.congestion_control == CongestionControl::Brutal;
         let conn_clone = conn.clone();
+
+        let nego = self
+            .config
+            .brutal
+            .as_ref()
+            .map(|cfg| BrutalNegotiation::new(cfg.up, cfg.cwnd_gain, cfg.ack_compensate));
         tokio::spawn(async move {
-            let _ = auth_sunny(&conn_clone, gen_sunny_user_hash(&username, &password))
+            let auth_ok = auth_sunny(&conn_clone, gen_sunny_user_hash(&username, &password))
                 .await
-                .map_err(|x| error!("authentication failed: {}", x));
+                .map_err(|x| error!("authentication failed: {}", x))
+                .is_ok();
+
+            if auth_ok && brutal {
+                if let Some(nego) = nego {
+                    let _ = negotiate_brutal_sunny(&conn_clone, nego)
+                        .await
+                        .map_err(|x| error!("brutal negotiation failed: {}", x));
+                }
+            }
+
             let _ = handle_udp_packet_recv(conn_clone)
                 .await
                 .map_err(|x| error!("handle udp packet recv error: {}", x));

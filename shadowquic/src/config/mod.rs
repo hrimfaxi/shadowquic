@@ -178,17 +178,34 @@ pub fn default_gso() -> bool {
     true
 }
 
+pub fn default_brutal_up() -> u64 {
+    1_000_000
+}
+
+pub fn default_brutal_down() -> u64 {
+    1_000_000
+}
+
 pub fn default_mtu_discovery() -> bool {
     true
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone)]
+pub fn default_brutal_cwnd_gain() -> f64 {
+    1.25
+}
+
+pub fn default_brutal_ack_compensate() -> bool {
+    false
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CongestionControl {
     #[default]
     Bbr,
     Cubic,
     NewReno,
+    Brutal,
 }
 /// Configuration of direct outbound
 /// Example:

@@ -94,6 +94,7 @@ impl Inbound for SunnyQuicServer {
                     Ok(conn) => {
                         let request_sender = request_sender.clone();
                         let user_hash = user_hash.clone();
+
                         tokio::spawn(async move {
                             Self::handle_incoming(conn, request_sender, user_hash)
                                 .await

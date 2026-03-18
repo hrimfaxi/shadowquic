@@ -20,6 +20,8 @@ use crate::{
     squic::wait_sunny_auth,
 };
 
+use brutal_jls::{CongestionParameter, brutal_set_parameter_by_remote};
+
 use super::{SQConn, handle_udp_packet_recv, handle_udp_recv_ctrl, handle_udp_send};
 
 pub type SunnyQuicUsers = Arc<HashMap<SunnyCredential, String>>;
@@ -54,6 +56,19 @@ impl<C: QuicConnection> SQServerConn<C> {
         }
         Ok(())
     }
+
+    fn apply_brutal_params(
+        &self,
+        remote: std::net::SocketAddr,
+        params: &[(CongestionParameter, &'static str)],
+    ) -> Result<(), SError> {
+        for (param, name) in params {
+            brutal_set_parameter_by_remote(remote, param.clone())
+                .map_err(|e| SError::SunnyAuthError(format!("set brutal {name} failed: {e}")))?;
+        }
+        Ok(())
+    }
+
     async fn handle_bistream(
         self,
         send: C::SendStream,
@@ -127,6 +142,33 @@ impl<C: QuicConnection> SQServerConn<C> {
                     self.inner.close(263, &[]);
                     return Err(SError::SunnyAuthError("Wrong password/username".into()));
                 }
+            }
+            SQReq::SQBrutalNegotiation(nego) => {
+                if self.inner.authed.get() != Some(&true) {
+                    tracing::warn!("brutal negotiation before authentication, closing");
+                    self.inner.close(263, &[]);
+                    return Err(SError::SunnyAuthError(
+                        "Auth required before brutal neg".into(),
+                    ));
+                }
+
+                let remote = self.inner.remote_address();
+                trace!("brutal negotiation: {:?}", nego);
+
+                self.apply_brutal_params(
+                    remote,
+                    &[
+                        (
+                            CongestionParameter::PeerBandwidthHint(nego.bandwidth_hint),
+                            "bandwidth_hint",
+                        ),
+                        (CongestionParameter::CwndGain(nego.cwnd_gain), "cwnd_gain"),
+                        (
+                            CongestionParameter::AckCompensation(nego.ack_compensate),
+                            "ack_compensation",
+                        ),
+                    ],
+                )?;
             }
             _ => {
                 unimplemented!()

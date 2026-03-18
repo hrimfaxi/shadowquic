@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::config::{default_brutal_ack_compensate, default_brutal_cwnd_gain, default_brutal_up};
 use crate::error::SError;
 
 use super::socks5::SocksAddr;
@@ -8,6 +9,33 @@ use shadowquic_macros::{SDecode, SEncode};
 
 pub static SUNNY_QUIC_AUTH_LEN: usize = 64;
 pub(crate) type SunnyCredential = Arc<[u8; SUNNY_QUIC_AUTH_LEN]>;
+
+#[derive(SEncode, SDecode, Clone, Debug, PartialEq)]
+pub struct BrutalNegotiation {
+    pub bandwidth_hint: u64,
+    pub cwnd_gain: f64,
+    pub ack_compensate: bool,
+}
+
+impl BrutalNegotiation {
+    pub fn new(bandwidth_hint: u64, cwnd_gain: f64, ack_compensate: bool) -> Self {
+        Self {
+            bandwidth_hint,
+            cwnd_gain,
+            ack_compensate,
+        }
+    }
+}
+
+impl Default for BrutalNegotiation {
+    fn default() -> Self {
+        Self::new(
+            default_brutal_up(),
+            default_brutal_cwnd_gain(),
+            default_brutal_ack_compensate(),
+        )
+    }
+}
 
 #[derive(PartialEq)]
 #[repr(u8)]
@@ -18,6 +46,7 @@ pub enum SQReq {
     SQAssociatOverDatagram(SocksAddr) = 0x3,
     SQAssociatOverStream(SocksAddr) = 0x4,
     SQAuthenticate(SunnyCredential) = 0x5,
+    SQBrutalNegotiation(BrutalNegotiation) = 0x6,
 }
 
 #[derive(SEncode, SDecode)]

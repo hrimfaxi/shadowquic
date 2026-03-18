@@ -6,13 +6,18 @@ use std::{
 use tokio::sync::{OnceCell, SetOnce};
 
 use super::quinn_wrapper::EndClient;
-use tracing::{error, info};
+use tracing::{error, info, trace};
 
 use crate::{
-    Outbound, config::ShadowQuicClientCfg, error::SError, quic::QuicClient,
+    Outbound, config::ShadowQuicClientCfg, error::SError, quic::QuicClient, quic::QuicConnection,
     squic::outbound::handle_request,
 };
 
+use crate::config::CongestionControl;
+use crate::msgs::{
+    SEncode,
+    squic::{BrutalNegotiation, SQReq::SQBrutalNegotiation},
+};
 use crate::squic::{IDStore, SQConn, handle_udp_packet_recv};
 
 pub type ShadowQuicConn = SQConn<<EndClient as QuicClient>::C>;
@@ -39,6 +44,25 @@ impl ShadowQuicClient {
             quic_conn: None,
             config: cfg,
         })
+    }
+
+    pub async fn negotiate_brutal(&self, conn: &ShadowQuicConn) -> Result<(), SError> {
+        match self.config.brutal.as_ref() {
+            Some(brutal) => {
+                trace!("starting Brutal negotiation: {:?}", brutal);
+                let negotiation_payload =
+                    BrutalNegotiation::new(brutal.up, brutal.cwnd_gain, brutal.ack_compensate);
+
+                let (mut send, _recv, _id) = QuicConnection::open_bi(&conn.conn).await?;
+                let req = SQBrutalNegotiation(negotiation_payload);
+                req.encode(&mut send).await?;
+            }
+            None => {
+                trace!("no explicit brutal config provided; skipping Brutal negotiation");
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn get_conn(&self) -> Result<ShadowQuicConn, SError> {
@@ -70,6 +94,11 @@ impl ShadowQuicClient {
             },
         };
         let conn_clone = conn.clone();
+
+        if self.config.congestion_control == CongestionControl::Brutal {
+            self.negotiate_brutal(&conn).await?;
+        }
+
         tokio::spawn(async move {
             let _ = handle_udp_packet_recv(conn_clone)
                 .await

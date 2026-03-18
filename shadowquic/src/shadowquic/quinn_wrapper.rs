@@ -1,25 +1,26 @@
 use std::{io, net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use brutal_jls::BrutalConfig;
 use bytes::Bytes;
+use quinn::rustls::{
+    RootCertStore,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+};
 use quinn::{
     ClientConfig, MtuDiscoveryConfig, SendDatagramError, TransportConfig, VarInt,
     congestion::{BbrConfig, CubicConfig, NewRenoConfig},
     crypto::rustls::QuicClientConfig,
 };
-use rustls_jls::{
-    RootCertStore,
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-};
 use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{debug, error, info, trace, warn};
 
-use rustls_jls::ServerConfig as RustlsServerConfig;
+use quinn::rustls::ServerConfig as RustlsServerConfig;
 
 use quinn::crypto::rustls::QuicServerConfig;
 
 use crate::{
-    config::{CongestionControl, ShadowQuicClientCfg, ShadowQuicServerCfg},
+    config::{BrutalParams, CongestionControl, ShadowQuicClientCfg, ShadowQuicServerCfg},
     error::SResult,
     quic::{
         MAX_DATAGRAM_WINDOW, MAX_SEND_WINDOW, MAX_STREAM_WINDOW, QuicClient, QuicConnection,
@@ -215,12 +216,12 @@ pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
     let root_store = RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.into(),
     };
-    let mut crypto = rustls_jls::ClientConfig::builder()
+    let mut crypto = quinn::rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
     crypto.alpn_protocols = cfg.alpn.iter().map(|x| x.to_owned().into_bytes()).collect();
     crypto.enable_early_data = cfg.zero_rtt;
-    crypto.jls_config = rustls_jls::jls::JlsClientConfig::new(&cfg.password, &cfg.username);
+    crypto.jls_config = quinn::rustls::jls::JlsClientConfig::new(&cfg.password, &cfg.username);
     let mut tp_cfg = TransportConfig::default();
 
     let mtudis = if cfg.mtu_discovery {
@@ -263,6 +264,30 @@ pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
         CongestionControl::Bbr => {
             tp_cfg.congestion_controller_factory(Arc::new(BbrConfig::default()))
         }
+        CongestionControl::Brutal => {
+            let (brutal, nego_enabled) = match cfg.brutal.clone() {
+                Some(v) => (v, true),
+                None => (BrutalParams::default(), false),
+            };
+
+            if nego_enabled {
+                tracing::info!(
+                    "using brutal congestion control with client negotiation: up={} down={} cwnd_gain={} ack={}",
+                    brutal.up,
+                    brutal.down,
+                    brutal.cwnd_gain,
+                    brutal.ack_compensate,
+                );
+            } else {
+                tracing::info!(
+                    "using brutal congestion control without client negotiation: local client defaults applied, server keeps its own brutal config"
+                );
+            }
+
+            let brutal_config =
+                BrutalConfig::new(brutal.up, brutal.cwnd_gain, brutal.ack_compensate);
+            tp_cfg.congestion_controller_factory(Arc::new(brutal_config))
+        }
     };
     let mut config = ClientConfig::new(Arc::new(
         QuicClientConfig::try_from(crypto).expect("rustls config can't created"),
@@ -281,9 +306,10 @@ impl QuicServer for Endpoint {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert_der = CertificateDer::from(cert.cert);
         let priv_key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
-        crypto = RustlsServerConfig::builder_with_protocol_versions(&[&rustls_jls::version::TLS13])
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der], PrivateKeyDer::Pkcs8(priv_key))?;
+        crypto =
+            RustlsServerConfig::builder_with_protocol_versions(&[&quinn::rustls::version::TLS13])
+                .with_no_client_auth()
+                .with_single_cert(vec![cert_der], PrivateKeyDer::Pkcs8(priv_key))?;
         crypto.alpn_protocols = cfg
             .alpn
             .iter()
@@ -293,7 +319,7 @@ impl QuicServer for Endpoint {
         crypto.max_early_data_size = if cfg.zero_rtt { u32::MAX } else { 0 };
         crypto.send_half_rtt_data = cfg.zero_rtt;
 
-        let mut jls_config = rustls_jls::jls::JlsServerConfig::default();
+        let mut jls_config = quinn::rustls::jls::JlsServerConfig::default();
         for user in &cfg.users {
             jls_config = jls_config.add_user(user.password.clone(), user.username.clone());
         }
@@ -330,6 +356,20 @@ impl QuicServer for Endpoint {
         }
 
         match cfg.congestion_control {
+            CongestionControl::Brutal => {
+                let brutal = cfg.brutal.clone().unwrap_or_default();
+
+                tracing::info!(
+                    "using brutal congestion control: up={} cwnd_gain={} ack_compensate={}",
+                    brutal.up,
+                    brutal.cwnd_gain,
+                    brutal.ack_compensate
+                );
+
+                let brutal_config =
+                    BrutalConfig::new(brutal.up, brutal.cwnd_gain, brutal.ack_compensate);
+                tp_cfg.congestion_controller_factory(Arc::new(brutal_config))
+            }
             CongestionControl::Bbr => {
                 let bbr_config = BbrConfig::default();
                 tp_cfg.congestion_controller_factory(Arc::new(bbr_config))
