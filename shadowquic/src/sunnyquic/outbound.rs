@@ -110,12 +110,13 @@ impl SunnyQuicClient {
                 .map_err(|x| error!("authentication failed: {}", x))
                 .is_ok();
 
-            if auth_ok && brutal {
-                if let Some(nego) = nego {
-                    let _ = negotiate_brutal_sunny(&conn_clone, nego)
-                        .await
-                        .map_err(|x| error!("brutal negotiation failed: {}", x));
-                }
+            if auth_ok
+                && brutal
+                && let Some(nego) = nego
+            {
+                let _ = negotiate_brutal_sunny(&conn_clone, nego)
+                    .await
+                    .map_err(|x| error!("brutal negotiation failed: {}", x));
             }
 
             let _ = handle_udp_packet_recv(conn_clone)
