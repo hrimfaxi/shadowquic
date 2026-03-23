@@ -178,20 +178,20 @@ pub fn default_gso() -> bool {
     true
 }
 
-pub fn default_brutal_up() -> u64 {
-    1_000_000
-}
-
-pub fn default_brutal_down() -> u64 {
-    1_000_000
-}
-
 pub fn default_mtu_discovery() -> bool {
     true
 }
 
+pub fn default_brutal_up() -> u64 {
+    10_000_000
+}
+
+pub fn default_brutal_down() -> u64 {
+    10_000_000
+}
+
 pub fn default_brutal_cwnd_gain() -> f64 {
-    1.25
+    1.10
 }
 
 pub fn default_brutal_ack_compensate() -> bool {
