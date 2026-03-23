@@ -1017,12 +1017,13 @@ dependencies = [
 
 [[package]]
 name = "fastbloom"
-version = "0.14.1"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e7f34442dbe69c60fe8eaf58a8cafff81a1f278816d8ab4db255b3bef4ac3c4"
+checksum = "ef975e30683b2d965054bb0a836f8973857c4ebf6acf274fe46617cd285060d8"
 dependencies = [
- "getrandom 0.3.4",
+ "foldhash",
  "libm",
+ "portable-atomic",
  "rand",
  "siphasher",
 ]
@@ -1657,7 +1658,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 [[package]]
 name = "iroh-quinn"
 version = "0.16.1"
-source = "git+https://github.com/hrimfaxi/iroh_quinn?branch=brutal#a7e47fc3a2754ef0c474bab33454a0642c1acc2c"
+source = "git+https://github.com/hrimfaxi/iroh_quinn?branch=brutal#7411992c73d5eb4069ac4dfc054347661067acd7"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1677,7 +1678,7 @@ dependencies = [
 [[package]]
 name = "iroh-quinn-proto"
 version = "0.15.1"
-source = "git+https://github.com/hrimfaxi/iroh_quinn?branch=brutal#a7e47fc3a2754ef0c474bab33454a0642c1acc2c"
+source = "git+https://github.com/hrimfaxi/iroh_quinn?branch=brutal#7411992c73d5eb4069ac4dfc054347661067acd7"
 dependencies = [
  "bytes",
  "derive_more",
@@ -1703,7 +1704,7 @@ dependencies = [
 [[package]]
 name = "iroh-quinn-udp"
 version = "0.8.0"
-source = "git+https://github.com/hrimfaxi/iroh_quinn?branch=brutal#a7e47fc3a2754ef0c474bab33454a0642c1acc2c"
+source = "git+https://github.com/hrimfaxi/iroh_quinn?branch=brutal#7411992c73d5eb4069ac4dfc054347661067acd7"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -2298,6 +2299,12 @@ dependencies = [
  "opaque-debug",
  "universal-hash",
 ]
+
+[[package]]
+name = "portable-atomic"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "potential_utf"
