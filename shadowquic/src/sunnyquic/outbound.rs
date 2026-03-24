@@ -103,7 +103,7 @@ impl SunnyQuicClient {
             .config
             .brutal
             .as_ref()
-            .map(|cfg| BrutalNegotiation::new(cfg.up, cfg.cwnd_gain, cfg.ack_compensate));
+            .map(|cfg| BrutalNegotiation::new(cfg.down, cfg.cwnd_gain, cfg.ack_compensate));
         tokio::spawn(async move {
             let auth_ok = auth_sunny(&conn_clone, gen_sunny_user_hash(&username, &password))
                 .await
