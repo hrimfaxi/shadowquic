@@ -50,11 +50,11 @@ impl ShadowQuicClient {
         match self.config.brutal.as_ref() {
             Some(brutal) => {
                 trace!("starting Brutal negotiation: {:?}", brutal);
-                let negotiation_payload =
+                let nego =
                     BrutalNegotiation::new(brutal.down, brutal.cwnd_gain, brutal.ack_compensate);
 
                 let (mut send, _recv, _id) = QuicConnection::open_bi(&conn.conn).await?;
-                let req = SQBrutalNegotiation(negotiation_payload);
+                let req = SQBrutalNegotiation(nego);
                 req.encode(&mut send).await?;
             }
             None => {
