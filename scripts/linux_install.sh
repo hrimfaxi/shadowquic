@@ -147,15 +147,44 @@ setup_systemd() {
 [Unit]
 Description=ShadowQuic Service
 Documentation=https://github.com/spongebob888/shadowquic
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-LimitNOFILE=1048576
+DynamicUser=yes
 ExecStart=$INSTALL_DIR/$APP_NAME -c $CONFIG_DIR/server.yaml
 Restart=always
 RestartSec=3
+LimitNOFILE=1048576
+
+# Managed writable directories for DynamicUser
+StateDirectory=shadowquic
+RuntimeDirectory=shadowquic
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+UMask=0077
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+
+# Retain only CAP_NET_BIND_SERVICE so users can switch to 443/80
+# without running the service as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
