@@ -28,8 +28,8 @@ quinn = { package = "quinn", git = "https://github.com/hrimfaxi/quinn-jls", bran
 #quinn = { path = "/home/hrimfaxi/quinn-jls/quinn", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
 
 
-brutal-iroh = { git = "https://github.com/hrimfaxi/brutal_quinn.git", branch = "master" }
-brutal-jls = { git = "https://github.com/hrimfaxi/brutal_quinn.git", branch = "master" }
+brutal-iroh = { git = "https://github.com/hrimfaxi/brutal_quinn.git", branch = "brutal_nego" }
+brutal-jls = { git = "https://github.com/hrimfaxi/brutal_quinn.git", branch = "brutal_nego" }
 #brutal-iroh = { path = "/home/hrimfaxi/brutal_quinn/brutal-iroh" }
 #brutal-jls = { path = "/home/hrimfaxi/brutal_quinn/brutal-jls"}
 

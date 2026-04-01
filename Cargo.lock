@@ -342,7 +342,7 @@ dependencies = [
 [[package]]
 name = "brutal-core"
 version = "0.1.0"
-source = "git+https://github.com/hrimfaxi/brutal_quinn.git?branch=master#688d8c5b5c4bf4f145259746796834066a1fdc95"
+source = "git+https://github.com/hrimfaxi/brutal_quinn.git?branch=brutal_nego#688d8c5b5c4bf4f145259746796834066a1fdc95"
 dependencies = [
  "tracing",
 ]
@@ -350,7 +350,7 @@ dependencies = [
 [[package]]
 name = "brutal-iroh"
 version = "0.1.0"
-source = "git+https://github.com/hrimfaxi/brutal_quinn.git?branch=master#688d8c5b5c4bf4f145259746796834066a1fdc95"
+source = "git+https://github.com/hrimfaxi/brutal_quinn.git?branch=brutal_nego#688d8c5b5c4bf4f145259746796834066a1fdc95"
 dependencies = [
  "brutal-core",
  "dashmap",
@@ -363,7 +363,7 @@ dependencies = [
 [[package]]
 name = "brutal-jls"
 version = "0.1.0"
-source = "git+https://github.com/hrimfaxi/brutal_quinn.git?branch=master#688d8c5b5c4bf4f145259746796834066a1fdc95"
+source = "git+https://github.com/hrimfaxi/brutal_quinn.git?branch=brutal_nego#688d8c5b5c4bf4f145259746796834066a1fdc95"
 dependencies = [
  "brutal-core",
  "dashmap",
