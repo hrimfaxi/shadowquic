@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
 use crate::config::{
@@ -241,12 +241,11 @@ impl Default for ShadowQuicClientCfg {
             mtu_discovery: default_mtu_discovery(),
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
-            brutal: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct BrutalParams {
     #[serde(deserialize_with = "deserialize_bps")]
@@ -340,8 +339,4 @@ pub struct ShadowQuicClientCfg {
     #[cfg(target_os = "android")]
     #[serde(default)]
     pub protect_path: Option<std::path::PathBuf>,
-
-    /// Brutal client configuration
-    #[serde(default)]
-    pub brutal: Option<BrutalParams>,
 }

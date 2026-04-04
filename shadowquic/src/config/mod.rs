@@ -206,15 +206,42 @@ pub fn default_brutal_ack_compensate() -> bool {
     false
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+/// Congestion control algorithm
+/// Example:
+/// ```yaml
+/// congestion-control: bbr # or cubic, new-reno, brutal
+/// ```
+/// If `brutal` is used, the configuration is like:
+/// ```yaml
+/// congestion-control:
+///   brutal:
+///     bandwidth: 10000000 # default 10000000 bps
+///
+/// For Brutal, the bandwidth is the uploading bandwidth.
+/// If you want to
+/// set the downloading bandwidth,  set the bandwidth of the peer(e.g. it's the server for the client)
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub enum CongestionControl {
     #[default]
     Bbr,
     Cubic,
     NewReno,
-    Brutal,
+    Brutal(BrutalParams),
 }
+
+impl PartialEq for CongestionControl {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (CongestionControl::Bbr, CongestionControl::Bbr)
+                | (CongestionControl::Cubic, CongestionControl::Cubic)
+                | (CongestionControl::NewReno, CongestionControl::NewReno)
+                | (CongestionControl::Brutal(_), CongestionControl::Brutal(_))
+        )
+    }
+}
+
 /// Configuration of direct outbound
 /// Example:
 /// ```yaml
@@ -268,6 +295,8 @@ impl LogLevel {
 
 #[cfg(test)]
 mod test {
+    use crate::config::{CongestionControl, ShadowQuicClientCfg};
+
     use super::Config;
     #[test]
     fn test() {
@@ -294,5 +323,20 @@ outbound:
 "###;
         let cfg: Result<Config, _> = serde_saphyr::from_str(cfgstr);
         assert!(cfg.is_err());
+    }
+    #[test]
+    fn test_cc() {
+        let cfgstr = r###"
+        username: "test"
+        password: "test"
+        addr: "127.0.0.1:1080"
+        server-name: "localhost"
+        congestion-control: 
+            brutal:
+                bandwidth: 10000000
+
+"###;
+        let cfg: Result<ShadowQuicClientCfg, _> = serde_saphyr::from_str(cfgstr);
+        assert!(cfg.is_ok());
     }
 }

@@ -264,8 +264,7 @@ pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
         CongestionControl::Bbr => {
             tp_cfg.congestion_controller_factory(Arc::new(BbrConfig::default()))
         }
-        CongestionControl::Brutal => {
-            let brutal = cfg.brutal.clone().unwrap_or_default();
+        CongestionControl::Brutal(ref brutal) => {
             tracing::info!(?brutal, "using brutal congestion control");
             let brutal_config = BrutalConfig::new(
                 brutal.bandwidth,
@@ -345,9 +344,7 @@ impl QuicServer for Endpoint {
         }
 
         match cfg.congestion_control {
-            CongestionControl::Brutal => {
-                let brutal = cfg.brutal.clone().unwrap_or_default();
-
+            CongestionControl::Brutal(ref brutal) => {
                 tracing::info!(?brutal, "using brutal congestion control");
                 let brutal_config = BrutalConfig::new(
                     brutal.bandwidth,

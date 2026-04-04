@@ -118,7 +118,6 @@ impl Default for SunnyQuicClientCfg {
             mtu_discovery: default_mtu_discovery(),
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
-            brutal: None,
         }
     }
 }
@@ -208,10 +207,6 @@ pub struct SunnyQuicClientCfg {
     #[cfg(target_os = "android")]
     #[serde(default)]
     pub protect_path: Option<std::path::PathBuf>,
-
-    /// Brutal client configuration
-    #[serde(default)]
-    pub brutal: Option<BrutalParams>,
 }
 
 type QuicPath = String;
