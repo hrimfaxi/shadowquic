@@ -15,7 +15,7 @@ use crate::{
     Outbound, UdpSession,
     config::{DirectOutCfg, DnsStrategy},
     error::SError,
-    msgs::socks5::{AddrOrDomain, SOCKS5_ADDR_TYPE_DOMAIN_NAME, SocksAddr, VarVec},
+    msgs::socks5::{AddrOrDomain, SocksAddr, VarVec},
     utils::dual_socket::DualSocket,
 };
 use async_trait::async_trait;
@@ -91,7 +91,6 @@ impl DnsResolve {
     async fn inv_resolve(&self, addr: &SocketAddr) -> SocksAddr {
         if let Some(add) = self.0.lock().await.iter().find(|x| x.1 == addr) {
             SocksAddr {
-                atype: SOCKS5_ADDR_TYPE_DOMAIN_NAME,
                 addr: AddrOrDomain::Domain(VarVec {
                     len: add.0.len() as u8,
                     contents: add.0.clone(),
@@ -133,12 +132,15 @@ impl DirectOut {
     }
 
     async fn handle_udp(&self, udp_session: UdpSession) -> Result<(), SError> {
-        trace!("associating udp to {}", udp_session.dst);
-        let dst = udp_session
-            .dst
-            .to_socket_addrs()?
-            .next()
-            .ok_or(SError::DomainResolveFailed(udp_session.dst.to_string()))?;
+        trace!("associating udp to {}", udp_session.bind_addr);
+        let dst =
+            udp_session
+                .bind_addr
+                .to_socket_addrs()?
+                .next()
+                .ok_or(SError::DomainResolveFailed(
+                    udp_session.bind_addr.to_string(),
+                ))?;
         trace!("resolved to {}", dst);
         let ipv4_only = dst.is_ipv4();
 

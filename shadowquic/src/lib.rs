@@ -18,7 +18,12 @@ pub mod msgs;
 pub mod quic;
 pub mod shadowquic;
 pub mod socks;
+pub mod squic;
+pub mod sunnyquic;
 pub mod utils;
+
+pub use msgs::SDecode;
+pub use msgs::SEncode;
 pub enum ProxyRequest<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend> {
     Tcp(TcpSession<T>),
     Udp(UdpSession<I, O>),
@@ -43,7 +48,7 @@ pub struct UdpSession<I = AnyUdpRecv, O = AnyUdpSend> {
     send: O,
     /// Control stream, should be kept alive during session.
     stream: Option<AnyTcp>,
-    dst: SocksAddr,
+    bind_addr: SocksAddr,
 }
 
 pub type AnyTcp = Box<dyn TcpTrait>;

@@ -24,7 +24,13 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
     let content = std::fs::read_to_string(cli.config).expect("can't open config yaml file");
-    let cfg: Config = serde_yaml::from_str(&content).expect("invalid yaml file content");
+    let cfg: Config = match serde_saphyr::from_str(&content) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("failed to parse config file: {e}");
+            std::process::exit(1);
+        }
+    };
     setup_log(cfg.log_level.clone());
     let manager = cfg
         .build_manager()
@@ -32,6 +38,7 @@ async fn main() {
         .expect("creating inbound/outbound failed");
 
     info!("shadowquic {} running", env!("CARGO_PKG_VERSION"));
+    let _ = std::env::current_dir().inspect(|x| info!("current working directory: {:?}", x));
     manager.run().await.expect("shadowquic stopped");
 }
 

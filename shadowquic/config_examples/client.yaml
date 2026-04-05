@@ -3,17 +3,18 @@ inbound:
     bind-addr: "127.0.0.1:1089"
 outbound:
     type: shadowquic
-    addr: "127.0.0.1:1443"
+    addr: "YOUR_SERVER_IP:1443"
     username: "87654321"
     password: "12345678"
-    server-name: "cloudflare.com" # must be the same as jls_upstream in server
+    server-name: "cloudflare.com"
     alpn: ["h3"]
-    initial-mtu: 1300
-    congestion-control: bbr
     zero-rtt: true
-    gso: true # Enable Quinn Generic Segmentation Offload (GSO)
-    over-stream: false  # true for udp over stream, false for udp over datagram
-log-level: "trace"
-
-
-
+    # Port hopping configuration
+    port-hop-interval: 10  # Max hop interval in seconds (0 to disable)
+                           # If < 5s, uses fixed 5s interval
+                           # If >= 5s, uses random between 5s and this value
+    port-hop-server-ports: "50000-60000"  # Server port range for hopping
+                                          # Format: "start-end", e.g., "50000-60000"
+                                          # Client will randomly connect to ports in this range
+                                          # Server needs iptables/nftables to redirect these ports
+log-level: "info"

@@ -22,7 +22,8 @@ use crate::{
     Outbound, ProxyRequest,
     config::SocksClientCfg,
     error::SError,
-    msgs::socks5::{AuthReply, AuthReq, CmdReq, SDecode, SEncode, SOCKS5_AUTH_METHOD_NONE, VarVec},
+    msgs::socks5::{AuthReply, AuthReq, CmdReq, SOCKS5_AUTH_METHOD_NONE, VarVec},
+    msgs::{SDecode, SEncode},
 };
 
 #[derive(Debug, Clone)]
@@ -143,7 +144,7 @@ impl SocksClient {
             version: SOCKS5_VERSION,
             cmd: SOCKS5_CMD_UDP_ASSOCIATE,
             rsv: SOCKS5_RESERVE,
-            dst: udp_session.dst.clone(),
+            dst: udp_session.bind_addr.clone(),
         };
         socksreq.encode(&mut tcp).await?;
         let rep = CmdReply::decode(&mut tcp).await?;
