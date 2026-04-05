@@ -241,6 +241,8 @@ impl Default for ShadowQuicClientCfg {
             mtu_discovery: default_mtu_discovery(),
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
+            port_hop_interval: 0,
+            port_hop_server_ports: None,
         }
     }
 }
@@ -339,4 +341,16 @@ pub struct ShadowQuicClientCfg {
     #[cfg(target_os = "android")]
     #[serde(default)]
     pub protect_path: Option<std::path::PathBuf>,
+
+    /// Port hopping interval in seconds (maximum).
+    /// When > 0, enables port hopping feature.
+    /// Actual interval is random between 5 seconds and this value.
+    #[serde(default)]
+    pub port_hop_interval: u64,
+
+    /// Server port range for port hopping.
+    /// Example: "50000-60000"
+    /// When port hopping is enabled, client will randomly connect to ports in this range.
+    #[serde(default)]
+    pub port_hop_server_ports: Option<String>,
 }
