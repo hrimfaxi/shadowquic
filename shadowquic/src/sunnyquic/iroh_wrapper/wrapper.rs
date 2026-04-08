@@ -12,10 +12,10 @@ use bytes::Bytes;
 use iroh_quinn::{
     ClientConfig, MtuDiscoveryConfig, SendDatagramError, TransportConfig, VarInt,
     congestion::{BbrConfig, CubicConfig, NewRenoConfig},
-    crypto::rustls::QuicClientConfig,
 };
 use rustls::{
     RootCertStore,
+    crypto::ring,
     pki_types::{CertificateDer, pem::PemObject},
 };
 use socket2::{Domain, Protocol, Socket, Type};
@@ -23,10 +23,13 @@ use tracing::{debug, trace, warn};
 
 use rustls::ServerConfig as RustlsServerConfig;
 
-use iroh_quinn::crypto::rustls::QuicServerConfig;
+use iroh_quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 
 use crate::{
-    config::{CongestionControl, SunnyQuicClientCfg, SunnyQuicServerCfg},
+    config::{
+        CipherSuitePreference, CongestionControl, SunnyQuicClientCfg, SunnyQuicServerCfg,
+        maybe_warn_cipher_suite_on_weak_arch, normalize_cipher_suite_preference,
+    },
     error::{SError, SResult},
     quic::{
         MAX_DATAGRAM_WINDOW, MAX_SEND_WINDOW, MAX_STREAM_WINDOW, QuicClient, QuicConnection,
@@ -273,7 +276,19 @@ async fn add_extra_path(
     Ok(())
 }
 
+fn to_rustls_cipher_suite(suite: &CipherSuitePreference) -> rustls::SupportedCipherSuite {
+    match suite {
+        CipherSuitePreference::Chacha20Poly1305 => {
+            ring::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256
+        }
+        CipherSuitePreference::Aes128Gcm => ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+        CipherSuitePreference::Aes256Gcm => ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+    }
+}
+
 pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> iroh_quinn::ClientConfig {
+    maybe_warn_cipher_suite_on_weak_arch(cfg);
+
     let mut root_store = RootCertStore::empty();
     for cert in
         rustls_native_certs::load_native_certs().expect("failed to load OS root certificates")
@@ -288,9 +303,22 @@ pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> iroh_quinn::ClientConfig {
         root_store.add_parsable_certificates(der_cert);
     }
 
-    let mut crypto = rustls::ClientConfig::builder()
+    let builder = if let Some(cipher_suite_preference) = &cfg.cipher_suite_preference {
+        let normalized = normalize_cipher_suite_preference(cipher_suite_preference);
+        let mut provider = ring::default_provider();
+        provider.cipher_suites = normalized.iter().map(to_rustls_cipher_suite).collect();
+
+        rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+    } else {
+        rustls::ClientConfig::builder()
+    };
+
+    let mut crypto = builder
         .with_root_certificates(root_store)
         .with_no_client_auth();
+
     crypto.alpn_protocols = cfg.alpn.iter().map(|x| x.to_owned().into_bytes()).collect();
     crypto.enable_early_data = cfg.zero_rtt;
     let mut tp_cfg = TransportConfig::default();

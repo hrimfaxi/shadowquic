@@ -10,17 +10,21 @@ use quinn::rustls::{
 use quinn::{
     ClientConfig, MtuDiscoveryConfig, SendDatagramError, TransportConfig, VarInt,
     congestion::{BbrConfig, CubicConfig, NewRenoConfig},
-    crypto::rustls::QuicClientConfig,
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{debug, error, info, trace, warn};
 
 use quinn::rustls::ServerConfig as RustlsServerConfig;
 
-use quinn::crypto::rustls::QuicServerConfig;
+use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+
+use quinn::rustls::crypto::ring;
 
 use crate::{
-    config::{CongestionControl, ShadowQuicClientCfg, ShadowQuicServerCfg},
+    config::{
+        CipherSuitePreference, CongestionControl, ShadowQuicClientCfg, ShadowQuicServerCfg,
+        maybe_warn_cipher_suite_on_weak_arch, normalize_cipher_suite_preference,
+    },
     error::SResult,
     quic::{
         MAX_DATAGRAM_WINDOW, MAX_SEND_WINDOW, MAX_STREAM_WINDOW, QuicClient, QuicConnection,
@@ -212,13 +216,40 @@ impl QuicClient for Endpoint {
     type C = Connection;
 }
 
+fn to_quinn_cipher_suite(suite: &CipherSuitePreference) -> quinn::rustls::SupportedCipherSuite {
+    match suite {
+        CipherSuitePreference::Chacha20Poly1305 => {
+            ring::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256
+        }
+        CipherSuitePreference::Aes128Gcm => ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+        CipherSuitePreference::Aes256Gcm => ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+    }
+}
+
 pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
+    maybe_warn_cipher_suite_on_weak_arch(cfg);
+
     let root_store = RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.into(),
     };
-    let mut crypto = quinn::rustls::ClientConfig::builder()
+
+    let builder = if let Some(cipher_suite_preference) = &cfg.cipher_suite_preference {
+        let normalized = normalize_cipher_suite_preference(cipher_suite_preference);
+
+        let mut provider = ring::default_provider();
+        provider.cipher_suites = normalized.iter().map(to_quinn_cipher_suite).collect();
+
+        quinn::rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[&quinn::rustls::version::TLS13])
+            .unwrap()
+    } else {
+        quinn::rustls::ClientConfig::builder()
+    };
+
+    let mut crypto = builder
         .with_root_certificates(root_store)
         .with_no_client_auth();
+
     crypto.alpn_protocols = cfg.alpn.iter().map(|x| x.to_owned().into_bytes()).collect();
     crypto.enable_early_data = cfg.zero_rtt;
     crypto.jls_config = quinn::rustls::jls::JlsClientConfig::new(&cfg.password, &cfg.username);

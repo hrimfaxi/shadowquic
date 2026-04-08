@@ -3,9 +3,10 @@ use std::{net::SocketAddr, path::PathBuf};
 use serde::Deserialize;
 
 use crate::config::{
-    AuthUser, BrutalParams, CongestionControl, default_alpn, default_congestion_control,
-    default_gso, default_initial_mtu, default_keep_alive_interval, default_min_mtu,
-    default_mtu_discovery, default_over_stream, default_zero_rtt,
+    AuthUser, BrutalParams, CipherSuitePreference, CongestionControl, HasCipherSuitePreference,
+    default_alpn, default_congestion_control, default_gso, default_initial_mtu,
+    default_keep_alive_interval, default_min_mtu, default_mtu_discovery, default_over_stream,
+    default_zero_rtt,
 };
 
 pub(crate) fn default_multipath_num() -> u32 {
@@ -116,6 +117,7 @@ impl Default for SunnyQuicClientCfg {
             cert_path: Default::default(),
             gso: default_gso(),
             mtu_discovery: default_mtu_discovery(),
+            cipher_suite_preference: None,
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
         }
@@ -203,10 +205,21 @@ pub struct SunnyQuicClientCfg {
     #[serde(default = "default_mtu_discovery")]
     pub mtu_discovery: bool,
 
+    /// Optional TLS 1.3 cipher suite preference.
+    /// If unset, use rustls/ring default preference order.
+    #[serde(default)]
+    pub cipher_suite_preference: Option<Vec<CipherSuitePreference>>,
+
     /// Android Only. the unix socket path for protecting android socket
     #[cfg(target_os = "android")]
     #[serde(default)]
     pub protect_path: Option<std::path::PathBuf>,
+}
+
+impl HasCipherSuitePreference for SunnyQuicClientCfg {
+    fn has_cipher_suite_preference(&self) -> bool {
+        self.cipher_suite_preference.is_some()
+    }
 }
 
 type QuicPath = String;

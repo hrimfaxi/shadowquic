@@ -5,11 +5,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
 use crate::config::{
-    AuthUser, CongestionControl, default_alpn, default_brutal_ack_compensate,
-    default_brutal_bandwidth, default_brutal_cwnd_gain, default_brutal_min_ack_rate,
-    default_brutal_min_sample_count, default_brutal_min_window, default_congestion_control,
-    default_gso, default_initial_mtu, default_keep_alive_interval, default_min_mtu,
-    default_mtu_discovery, default_over_stream, default_zero_rtt,
+    AuthUser, CipherSuitePreference, CongestionControl, HasCipherSuitePreference, default_alpn,
+    default_brutal_ack_compensate, default_brutal_bandwidth, default_brutal_cwnd_gain,
+    default_brutal_min_ack_rate, default_brutal_min_sample_count, default_brutal_min_window,
+    default_congestion_control, default_gso, default_initial_mtu, default_keep_alive_interval,
+    default_min_mtu, default_mtu_discovery, default_over_stream, default_zero_rtt,
 };
 
 pub fn default_rate_limit() -> u64 {
@@ -239,6 +239,7 @@ impl Default for ShadowQuicClientCfg {
             keep_alive_interval: default_keep_alive_interval(),
             gso: default_gso(),
             mtu_discovery: default_mtu_discovery(),
+            cipher_suite_preference: None,
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
         }
@@ -335,8 +336,19 @@ pub struct ShadowQuicClientCfg {
     #[serde(default = "default_mtu_discovery")]
     pub mtu_discovery: bool,
 
+    /// Optional TLS 1.3 cipher suite preference.
+    /// If unset, use rustls/ring default preference order.
+    #[serde(default)]
+    pub cipher_suite_preference: Option<Vec<CipherSuitePreference>>,
+
     /// Android Only. the unix socket path for protecting android socket
     #[cfg(target_os = "android")]
     #[serde(default)]
     pub protect_path: Option<std::path::PathBuf>,
+}
+
+impl HasCipherSuitePreference for ShadowQuicClientCfg {
+    fn has_cipher_suite_preference(&self) -> bool {
+        self.cipher_suite_preference.is_some()
+    }
 }
