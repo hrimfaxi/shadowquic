@@ -9,7 +9,8 @@ PLAIN='\033[0m'
 APP_NAME="shadowquic"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/shadowquic"
-SERVICE_FILE="/etc/systemd/system/shadowquic.service"
+SERVICE_FILE="/etc/systemd/system/shadowquic@.service"
+INSTANCE=server
 GITHUB_REPO="spongebob888/shadowquic"
 
 # Helper functions for logging
@@ -102,8 +103,8 @@ configure_system() {
         mkdir -p "$CONFIG_DIR"
     fi
 
-    if [ -f "$CONFIG_DIR/server.yaml" ]; then
-        log_success "Config file already exists at $CONFIG_DIR/server.yaml"
+    if [ -f "$CONFIG_DIR/$INSTANCE.yaml" ]; then
+        log_success "Config file already exists at $CONFIG_DIR/$INSTANCE.yaml"
         return
     fi
 
@@ -119,8 +120,8 @@ configure_system() {
     GEN_ADDR="$bind_addr"
     GEN_DOMAIN="$jls_domain"
 
-    log_info "Creating server config..."
-    cat > "$CONFIG_DIR/server.yaml" <<EOF
+    log_info "Creating $INSTANCE config..."
+    cat > "$CONFIG_DIR/$INSTANCE.yaml" <<EOF
 inbound:
     type: shadowquic
     bind-addr: "$bind_addr"
@@ -137,7 +138,7 @@ outbound:
     dns-strategy: prefer-ipv4 # or prefer-ipv6, ipv4-only, ipv6-only
 log-level: "info"
 EOF
-    log_success "Server config created at $CONFIG_DIR/server.yaml"
+    log_success "Server config created at $CONFIG_DIR/$INSTANCE.yaml"
 }
 
 # Setup systemd service
@@ -153,7 +154,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 DynamicUser=yes
-ExecStart=$INSTALL_DIR/$APP_NAME -c $CONFIG_DIR/server.yaml
+ExecStart=$INSTALL_DIR/$APP_NAME -c $CONFIG_DIR/%i.yaml
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -192,14 +193,17 @@ EOF
 
     log_info "Reloading systemd..."
     systemctl daemon-reload
-    systemctl enable shadowquic
+    systemctl enable "shadowquic@$INSTANCE"
 }
 
 # Stop existing service
 stop_service() {
-    if systemctl is-active --quiet shadowquic; then
-        log_info "Stopping existing shadowquic service..."
-        systemctl stop shadowquic
+    log_info "Disabling legacy shadowquic service if present..."
+    systemctl disable --now shadowquic >/dev/null 2>&1 || true
+
+    if systemctl is-active --quiet "shadowquic@$INSTANCE"; then
+        log_info "Stopping existing shadowquic@$INSTANCE service..."
+        systemctl stop "shadowquic@$INSTANCE"
     fi
 }
 
@@ -214,8 +218,8 @@ main() {
     setup_systemd
 
     log_success "Installation complete!"
-    log_success "You can start the service with: systemctl start shadowquic"
-    log_success "Check status with: systemctl status shadowquic"
+    log_success "You can start the service with: systemctl start shadowquic@$INSTANCE"
+    log_success "Check status with: systemctl status shadowquic@$INSTANCE"
 
     if [ -n "$GEN_USERNAME" ]; then
         echo ""
