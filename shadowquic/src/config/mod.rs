@@ -11,6 +11,8 @@ use crate::{
     sunnyquic::{inbound::SunnyQuicServer, outbound::SunnyQuicClient},
 };
 
+mod port_hop;
+pub use crate::config::port_hop::*;
 mod shadowquic;
 mod sunnyquic;
 pub use crate::config::shadowquic::*;

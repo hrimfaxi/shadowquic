@@ -5,11 +5,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
 use crate::config::{
-    AuthUser, CipherSuitePreference, CongestionControl, HasCipherSuitePreference, default_alpn,
-    default_brutal_ack_compensate, default_brutal_bandwidth, default_brutal_cwnd_gain,
-    default_brutal_min_ack_rate, default_brutal_min_sample_count, default_brutal_min_window,
-    default_congestion_control, default_gso, default_initial_mtu, default_keep_alive_interval,
-    default_min_mtu, default_mtu_discovery, default_over_stream, default_zero_rtt,
+    AuthUser, CipherSuitePreference, CongestionControl, HasCipherSuitePreference, PortHopCfg,
+    default_alpn, default_brutal_ack_compensate, default_brutal_bandwidth,
+    default_brutal_cwnd_gain, default_brutal_min_ack_rate, default_brutal_min_sample_count,
+    default_brutal_min_window, default_congestion_control, default_gso, default_initial_mtu,
+    default_keep_alive_interval, default_min_mtu, default_mtu_discovery, default_over_stream,
+    default_zero_rtt,
 };
 
 pub fn default_rate_limit() -> u64 {
@@ -240,6 +241,7 @@ impl Default for ShadowQuicClientCfg {
             gso: default_gso(),
             mtu_discovery: default_mtu_discovery(),
             cipher_suite_preference: None,
+            port_hop: None,
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
         }
@@ -340,6 +342,9 @@ pub struct ShadowQuicClientCfg {
     /// If unset, use rustls/ring default preference order.
     #[serde(default)]
     pub cipher_suite_preference: Option<Vec<CipherSuitePreference>>,
+
+    #[serde(default)]
+    pub port_hop: Option<PortHopCfg>,
 
     /// Android Only. the unix socket path for protecting android socket
     #[cfg(target_os = "android")]

@@ -32,6 +32,8 @@ use crate::{
     },
 };
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 pub type Connection = quinn::Connection;
 pub struct Endpoint {
     inner: quinn::Endpoint,
@@ -44,6 +46,8 @@ impl Deref for Endpoint {
         &self.inner
     }
 }
+
+static GSO_WARN: AtomicBool = AtomicBool::new(false);
 
 pub use Endpoint as EndClient;
 pub use Endpoint as EndServer;
@@ -272,7 +276,7 @@ pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
         .initial_mtu(cfg.initial_mtu)
         .enable_segmentation_offload(cfg.gso);
 
-    if !cfg.gso {
+    if !cfg.gso && !GSO_WARN.swap(true, Ordering::Relaxed) {
         tracing::warn!("disabling QUIC segmentation offload (GSO)");
     }
 
@@ -370,7 +374,7 @@ impl QuicServer for Endpoint {
             .initial_mtu(cfg.initial_mtu)
             .enable_segmentation_offload(cfg.gso);
 
-        if !cfg.gso {
+        if !cfg.gso && !GSO_WARN.swap(true, Ordering::Relaxed) {
             tracing::warn!("disabling QUIC segmentation offload (GSO)");
         }
 
