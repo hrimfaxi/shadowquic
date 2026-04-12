@@ -218,7 +218,9 @@ pub struct SunnyQuicClientCfg {
 
 impl HasCipherSuitePreference for SunnyQuicClientCfg {
     fn has_cipher_suite_preference(&self) -> bool {
-        self.cipher_suite_preference.is_some()
+        self.cipher_suite_preference
+            .as_ref()
+            .is_some_and(|preferences| !preferences.is_empty())
     }
 }
 

@@ -349,6 +349,8 @@ pub struct ShadowQuicClientCfg {
 
 impl HasCipherSuitePreference for ShadowQuicClientCfg {
     fn has_cipher_suite_preference(&self) -> bool {
-        self.cipher_suite_preference.is_some()
+        self.cipher_suite_preference
+            .as_ref()
+            .is_some_and(|preferences| !preferences.is_empty())
     }
 }
