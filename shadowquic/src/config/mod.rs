@@ -344,6 +344,7 @@ mod test {
     use crate::config::{CongestionControl, ShadowQuicClientCfg};
 
     use super::Config;
+    use super::{CipherSuitePreference, normalize_cipher_suite_preference};
     #[test]
     fn test() {
         let cfgstr = r###"
@@ -389,5 +390,42 @@ outbound:
             }
             _ => panic!("expected brutal congestion control"),
         }
+    }
+
+    #[test]
+    fn normalize_cipher_suite_preference_preserves_first_seen_order_and_removes_duplicates() {
+        let input = vec![
+            CipherSuitePreference::Chacha20Poly1305,
+            CipherSuitePreference::Aes256Gcm,
+            CipherSuitePreference::Chacha20Poly1305,
+            CipherSuitePreference::Aes128Gcm,
+            CipherSuitePreference::Aes256Gcm,
+        ];
+        let normalized = normalize_cipher_suite_preference(&input);
+        assert_eq!(
+            normalized,
+            vec![
+                CipherSuitePreference::Chacha20Poly1305,
+                CipherSuitePreference::Aes256Gcm,
+                CipherSuitePreference::Aes128Gcm,
+            ]
+        );
+    }
+    #[test]
+    fn normalize_cipher_suite_preference_appends_aes128_gcm_when_absent() {
+        let input = vec![
+            CipherSuitePreference::Aes256Gcm,
+            CipherSuitePreference::Chacha20Poly1305,
+            CipherSuitePreference::Aes256Gcm,
+        ];
+        let normalized = normalize_cipher_suite_preference(&input);
+        assert_eq!(
+            normalized,
+            vec![
+                CipherSuitePreference::Aes256Gcm,
+                CipherSuitePreference::Chacha20Poly1305,
+                CipherSuitePreference::Aes128Gcm,
+            ]
+        );
     }
 }
