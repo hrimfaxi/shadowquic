@@ -280,14 +280,13 @@ impl ShadowQuicClient {
             .current_addr
             .unwrap_or_else(|| self.resolve_base_addr());
 
-        if self.quic_end.is_some() {
-            let conn = {
-                let end = self
-                    .quic_end
-                    .as_ref()
-                    .expect("quic_end must exist when quic_end.is_some()");
-                self.connect_with_endpoint(end, addr).await?
-            };
+        let conn = if let Some(end) = self.quic_end.as_ref() {
+            Some(self.connect_with_endpoint(end, addr).await?)
+        } else {
+            None
+        };
+
+        if let Some(conn) = conn {
             self.quic_conn = Some(conn);
             self.current_addr = Some(addr);
             return Ok(());
