@@ -4,17 +4,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::sync::{OnceCell, SetOnce};
+use tokio::sync::SetOnce;
 
 use super::EndClient;
 use tracing::{debug, error, info, warn};
 
 use crate::{
     Outbound,
-    config::MIN_PORT_HOP_INTERVAL,
-    config::SunnyQuicClientCfg,
+    config::{
+        MAX_DRAINING_PATHS, MIN_PORT_HOP_INTERVAL, PORT_HOP_DRAIN_TIMEOUT, SunnyQuicClientCfg,
+    },
     error::SError,
     quic::{QuicClient, QuicConnection},
     squic::{auth_sunny, outbound::handle_request},
@@ -25,10 +26,20 @@ use crate::squic::{IDStore, SQConn, handle_udp_packet_recv};
 
 pub type SunnyQuicConn = SQConn<<EndClient as QuicClient>::C>;
 
+struct DrainingPath {
+    end: EndClient,
+    conn: SunnyQuicConn,
+    addr: SocketAddr,
+    since: Instant,
+}
+
 pub struct SunnyQuicClient {
     pub quic_conn: Option<SunnyQuicConn>,
     pub config: SunnyQuicClientCfg,
-    pub quic_end: OnceCell<EndClient>,
+    pub quic_end: Option<EndClient>,
+    current_addr: Option<SocketAddr>,
+    draining: Vec<DrainingPath>,
+
     /// Flag indicating that a port hop should be performed on the next prepare_conn call
     hop_requested: Arc<AtomicBool>,
     /// graceful shutdown signal sender for hop timer
@@ -91,7 +102,9 @@ impl SunnyQuicClient {
 
         Self {
             quic_conn: None,
-            quic_end: OnceCell::new(),
+            quic_end: None,
+            current_addr: None,
+            draining: Vec::new(),
             config: cfg,
             hop_requested,
             hop_shutdown_tx: Some(hop_shutdown_tx),
@@ -104,66 +117,21 @@ impl SunnyQuicClient {
 
     pub fn new_with_socket(cfg: SunnyQuicClientCfg, socket: UdpSocket) -> Result<Self, SError> {
         let mut client = Self::new(cfg);
-
-        client.quic_end = OnceCell::from(EndClient::new_with_socket(&client.config, socket)?);
+        client.quic_end = Some(EndClient::new_with_socket(&client.config, socket)?);
         Ok(client)
     }
 
-    pub async fn get_conn(&self) -> Result<SunnyQuicConn, SError> {
-        let addr = self
-            .config
+    fn resolve_base_addr(&self) -> SocketAddr {
+        self.config
             .addr
             .to_socket_addrs()
             .unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr))
             .next()
-            .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr));
-        let end = self
-            .quic_end
-            .get_or_init(|| async {
-                match self.init_endpoint(true).await {
-                    Ok(ep) => ep,
-                    Err(_) => self
-                        .init_endpoint(false)
-                        .await
-                        .expect("error during initialize quic endpoint"),
-                }
-            })
-            .await;
-        let conn = QuicClient::connect(end, addr, &self.config.server_name).await?;
-
-        let conn = SQConn {
-            conn,
-            authed: Arc::new(SetOnce::new()),
-            send_id_store: Default::default(),
-            recv_id_store: IDStore {
-                id_counter: Default::default(),
-                inner: Default::default(),
-            },
-        };
-
-        let username = self.config.username.clone();
-        let password = self.config.password.clone();
-        let conn_clone = conn.clone();
-        tokio::spawn(async move {
-            let _ = auth_sunny(&conn_clone, gen_sunny_user_hash(&username, &password))
-                .await
-                .map_err(|x| error!("authentication failed: {}", x));
-            let _ = handle_udp_packet_recv(conn_clone)
-                .await
-                .map_err(|x| error!("handle udp packet recv error: {}", x));
-        });
-        Ok(conn)
+            .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
     }
 
-    async fn hop_port(&mut self) -> Result<(), SError> {
-        let base_addr = self
-            .config
-            .addr
-            .to_socket_addrs()
-            .unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr))
-            .next()
-            .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr));
-
+    fn select_hop_addr(&self) -> SocketAddr {
+        let base_addr = self.resolve_base_addr();
         let ip = base_addr.ip();
         let base_port = base_addr.port();
 
@@ -178,53 +146,192 @@ impl SunnyQuicClient {
             None => base_port,
         };
 
-        let addr = SocketAddr::new(ip, target_port);
-        info!("starting port hop to server {}", addr);
+        SocketAddr::new(ip, target_port)
+    }
 
-        if let Some(ref conn) = self.quic_conn {
-            conn.conn.close(0u8.into(), b"port hop");
+    async fn build_endpoint(&self) -> Result<EndClient, SError> {
+        match self.init_endpoint(true).await {
+            Ok(ep) => Ok(ep),
+            Err(_) => self.init_endpoint(false).await,
         }
+    }
 
-        self.quic_conn = None;
-        self.quic_end.take();
-
-        let end = match self.init_endpoint(true).await {
-            Ok(ep) => ep,
-            Err(_) => self.init_endpoint(false).await?,
-        };
-        let _ = self.quic_end.set(end);
-
-        let end = self
-            .quic_end
-            .get()
-            .expect("quic endpoint must be initialized after port hop");
-
-        let conn = QuicClient::connect(end, addr, &self.config.server_name).await?;
-
-        let new_conn = SQConn {
-            conn,
+    fn wrap_conn(raw: <EndClient as QuicClient>::C) -> SunnyQuicConn {
+        SQConn {
+            conn: raw,
             authed: Arc::new(SetOnce::new()),
             send_id_store: Default::default(),
             recv_id_store: IDStore {
                 id_counter: Default::default(),
                 inner: Default::default(),
             },
-        };
+        }
+    }
 
-        let conn_clone = new_conn.clone();
+    fn spawn_recv_tasks(&self, conn: SunnyQuicConn) {
+        let username = self.config.username.clone();
+        let password = self.config.password.clone();
+
         tokio::spawn(async move {
-            let _ = handle_udp_packet_recv(conn_clone)
+            let _ = auth_sunny(&conn, gen_sunny_user_hash(&username, &password))
+                .await
+                .map_err(|x| error!("authentication failed: {}", x));
+
+            let _ = handle_udp_packet_recv(conn)
                 .await
                 .map_err(|x| error!("handle udp packet recv error: {}", x));
         });
+    }
 
+    async fn connect_with_endpoint(
+        &self,
+        end: &EndClient,
+        addr: SocketAddr,
+    ) -> Result<SunnyQuicConn, SError> {
+        let raw = QuicClient::connect(end, addr, &self.config.server_name).await?;
+        let conn = Self::wrap_conn(raw);
+        self.spawn_recv_tasks(conn.clone());
+        Ok(conn)
+    }
+
+    async fn build_path(&self, addr: SocketAddr) -> Result<(EndClient, SunnyQuicConn), SError> {
+        let end = self.build_endpoint().await?;
+        let conn = self.connect_with_endpoint(&end, addr).await?;
+        Ok((end, conn))
+    }
+
+    fn cleanup_draining(&mut self) {
+        self.draining.retain(|path| {
+            let _keep_endpoint_alive = &path.end;
+
+            if let Some(reason) = QuicConnection::close_reason(&path.conn.conn) {
+                debug!(
+                    "drained quic connection to {} closed due to {}",
+                    path.addr, reason
+                );
+                return false;
+            }
+
+            if path.since.elapsed() >= PORT_HOP_DRAIN_TIMEOUT {
+                debug!(
+                    "closing drained quic connection to {} after {:?}",
+                    path.addr, PORT_HOP_DRAIN_TIMEOUT
+                );
+                path.conn.conn.close(0u8.into(), b"port hop drain timeout");
+                return false;
+            }
+
+            true
+        });
+
+        while self.draining.len() > MAX_DRAINING_PATHS {
+            let old = self.draining.remove(0);
+            debug!(
+                "closing oldest drained quic connection to {} because draining set exceeds {}",
+                old.addr, MAX_DRAINING_PATHS
+            );
+            old.conn
+                .conn
+                .close(0u8.into(), b"port hop draining overflow");
+        }
+    }
+
+    pub async fn get_conn(&self) -> Result<SunnyQuicConn, SError> {
+        self.quic_conn
+            .clone()
+            .ok_or_else(|| std::io::Error::other("quic connection not prepared").into())
+    }
+
+    async fn hop_port(&mut self) -> Result<(), SError> {
+        let addr = self.select_hop_addr();
+        info!("starting soft port hop to server {}", addr);
+
+        // 1. Build new path first. If this fails, the old path remains intact.
+        let (new_end, new_conn) = self.build_path(addr).await?;
+
+        // 2. Move old active path into draining instead of closing it immediately.
+        if let Some(old_conn) = self.quic_conn.take() {
+            if let Some(old_end) = self.quic_end.take() {
+                let old_addr = self
+                    .current_addr
+                    .unwrap_or_else(|| self.resolve_base_addr());
+                debug!("moving old quic path {} into draining set", old_addr);
+
+                self.draining.push(DrainingPath {
+                    end: old_end,
+                    conn: old_conn,
+                    addr: old_addr,
+                    since: Instant::now(),
+                });
+            } else {
+                // Should not normally happen, but if it does, we cannot keep the old path alive safely.
+                warn!(
+                    "active quic connection exists without endpoint; closing old path during hop"
+                );
+                old_conn
+                    .conn
+                    .close(0u8.into(), b"port hop missing endpoint");
+            }
+        }
+
+        // 3. Switch new path to active.
+        self.quic_end = Some(new_end);
         self.quic_conn = Some(new_conn);
+        self.current_addr = Some(addr);
 
-        debug!("port hopped to server port {}", target_port);
+        // 4. Opportunistic cleanup.
+        self.cleanup_draining();
+
+        debug!("soft port hopped to server {}", addr);
+        Ok(())
+    }
+
+    async fn ensure_active_conn(&mut self) -> Result<(), SError> {
+        if self.quic_conn.is_some() {
+            return Ok(());
+        }
+
+        let addr = self
+            .current_addr
+            .unwrap_or_else(|| self.resolve_base_addr());
+
+        if self.quic_end.is_some() {
+            let conn = {
+                let end = self
+                    .quic_end
+                    .as_ref()
+                    .expect("quic_end must exist when quic_end.is_some()");
+                self.connect_with_endpoint(end, addr).await?
+            };
+            self.quic_conn = Some(conn);
+            self.current_addr = Some(addr);
+            return Ok(());
+        }
+
+        let (end, conn) = self.build_path(addr).await?;
+        self.quic_end = Some(end);
+        self.quic_conn = Some(conn);
+        self.current_addr = Some(addr);
         Ok(())
     }
 
     async fn prepare_conn(&mut self) -> Result<(), SError> {
+        // Clean up old drained paths first.
+        self.cleanup_draining();
+
+        // If active connection is already closed, drop only the active connection.
+        // Keep the active endpoint so normal reconnect behavior stays unchanged.
+        let active_closed_reason = self
+            .quic_conn
+            .as_ref()
+            .and_then(|x| QuicConnection::close_reason(&x.conn));
+
+        if let Some(reason) = active_closed_reason {
+            debug!("active quic connection closed due to {}", reason);
+            self.quic_conn = None;
+        }
+
+        // Process pending hop request using make-before-break.
         if self.hop_requested.swap(false, Ordering::SeqCst) {
             match self.hop_port().await {
                 Ok(()) => {}
@@ -232,28 +339,21 @@ impl SunnyQuicClient {
             }
         }
 
-        // delete connection if closed.
-        self.quic_conn.take_if(|x| {
-            QuicConnection::close_reason(&x.conn).is_some_and(|x| {
-                info!("quic connection closed due to {}", x);
-                true
-            })
-        });
-        // Creating new connectin
-        if self.quic_conn.is_none() {
-            self.quic_conn = Some(self.get_conn().await?);
-        }
+        // Ensure there is an active connection.
+        self.ensure_active_conn().await?;
+
         Ok(())
     }
 }
+
 #[async_trait]
 impl Outbound for SunnyQuicClient {
     async fn handle(&mut self, req: crate::ProxyRequest) -> Result<(), crate::error::SError> {
         self.prepare_conn().await?;
 
-        let conn = self.quic_conn.as_mut().unwrap().clone();
-
+        let conn = self.quic_conn.as_ref().unwrap().clone();
         let over_stream = self.config.over_stream;
+
         handle_request(req, conn, over_stream).await?;
         Ok(())
     }

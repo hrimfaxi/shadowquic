@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use std::time::Duration;
+
 /// Minimum port hop interval in seconds
 pub const MIN_PORT_HOP_INTERVAL: u64 = 5;
 
@@ -100,3 +102,9 @@ mod tests {
         assert!(PortRange::deserialize(de).is_err());
     }
 }
+
+/// How long an old path is kept alive after a hop.
+pub const PORT_HOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Maximum number of old paths kept in draining state.
+pub const MAX_DRAINING_PATHS: usize = 8;
