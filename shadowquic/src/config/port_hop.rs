@@ -104,7 +104,7 @@ mod tests {
 }
 
 /// How long an old path is kept alive after a hop.
-pub const PORT_HOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(90);
+pub const PORT_HOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Maximum number of old paths kept in draining state.
-pub const MAX_DRAINING_PATHS: usize = 8;
+pub const MAX_DRAINING_PATHS: usize = 16;
