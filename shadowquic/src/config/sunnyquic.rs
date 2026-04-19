@@ -118,6 +118,9 @@ impl Default for SunnyQuicClientCfg {
             gso: default_gso(),
             mtu_discovery: default_mtu_discovery(),
             cipher_suite_preference: None,
+            hop_interval: None,
+            min_hop_interval: None,
+            max_hop_interval: None,
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
         }
@@ -209,6 +212,13 @@ pub struct SunnyQuicClientCfg {
     /// If unset, use rustls/ring default preference order.
     #[serde(default)]
     pub cipher_suite_preference: Option<Vec<CipherSuitePreference>>,
+
+    #[serde(default)]
+    pub hop_interval: Option<u32>,
+    #[serde(default)]
+    pub min_hop_interval: Option<u32>,
+    #[serde(default)]
+    pub max_hop_interval: Option<u32>,
 
     /// Android Only. the unix socket path for protecting android socket
     #[cfg(target_os = "android")]
