@@ -1,14 +1,11 @@
 name: Release
 
 on:
-  schedule:
-    - cron: '0 18 * * 0,2,4,6'
-  workflow_dispatch:
-    inputs:
-      clean_cache:
-        description: 'Clear caches'
-        required: false
-        type: boolean
+  push:
+    tags: [ "v*" ]
+    branches: [ "main", "dev" ]
+  pull_request:
+    branches: [ "main", "dev" ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
