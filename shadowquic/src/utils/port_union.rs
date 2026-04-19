@@ -56,7 +56,10 @@ impl FromStr for PortUnion {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         if s == "all" || s == "*" {
-            return Ok(PortUnion(vec![PortRange { start: 0, end: 65535 }]));
+            return Ok(PortUnion(vec![PortRange {
+                start: 0,
+                end: 65535,
+            }]));
         }
 
         let mut ranges = Vec::new();
@@ -70,15 +73,24 @@ impl FromStr for PortUnion {
                 let start_str = bounds.next().unwrap().trim();
                 let end_str = bounds.next().unwrap().trim();
 
-                let mut start = start_str.parse::<u16>().map_err(|_| format!("invalid port: {}", start_str))?;
-                let mut end = end_str.parse::<u16>().map_err(|_| format!("invalid port: {}", end_str))?;
+                let mut start = start_str
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid port: {}", start_str))?;
+                let mut end = end_str
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid port: {}", end_str))?;
                 if start > end {
                     std::mem::swap(&mut start, &mut end);
                 }
                 ranges.push(PortRange { start, end });
             } else {
-                let port = part.parse::<u16>().map_err(|_| format!("invalid port: {}", part))?;
-                ranges.push(PortRange { start: port, end: port });
+                let port = part
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid port: {}", part))?;
+                ranges.push(PortRange {
+                    start: port,
+                    end: port,
+                });
             }
         }
 

@@ -45,32 +45,60 @@ impl ShadowQuicClient {
     }
 
     pub async fn get_conn(&self) -> Result<ShadowQuicConn, SError> {
-        let addr = self.local_proxy_addr.get_or_init(|| async {
-            let hop_interval = self.config.hop_interval.or(self.config.min_hop_interval).unwrap_or(0);
-            if let Ok(udphop_addr) = crate::utils::udphop::UdpHopAddr::parse(&self.config.addr) {
-                if udphop_addr.ports.len() > 1 || hop_interval > 0 {
-                    let min_interval = self.config.min_hop_interval.or(self.config.hop_interval).unwrap_or(30000);
-                    let max_interval = self.config.max_hop_interval.or(self.config.hop_interval).unwrap_or(30000);
-                    
-                    match crate::utils::udphop::UdpHopClientProxy::start(
-                        &udphop_addr,
-                        min_interval,
-                        max_interval,
-                    ).await {
-                        Ok(addr) => return addr,
-                        Err(e) => {
-                            tracing::error!("Failed to start UDP hop proxy: {}", e);
+        let addr = self
+            .local_proxy_addr
+            .get_or_init(|| async {
+                let hop_interval = self
+                    .config
+                    .hop_interval
+                    .or(self.config.min_hop_interval)
+                    .unwrap_or(0);
+                if let Ok(udphop_addr) = crate::utils::udphop::UdpHopAddr::parse(&self.config.addr)
+                {
+                    if udphop_addr.ports.len() > 1 || hop_interval > 0 {
+                        let min_interval = self
+                            .config
+                            .min_hop_interval
+                            .or(self.config.hop_interval)
+                            .unwrap_or(30000);
+                        let max_interval = self
+                            .config
+                            .max_hop_interval
+                            .or(self.config.hop_interval)
+                            .unwrap_or(30000);
+
+                        match crate::utils::udphop::UdpHopClientProxy::start(
+                            &udphop_addr,
+                            min_interval,
+                            max_interval,
+                        )
+                        .await
+                        {
+                            Ok(addr) => return addr,
+                            Err(e) => {
+                                tracing::error!("Failed to start UDP hop proxy: {}", e);
+                            }
                         }
                     }
+
+                    let host_port = format!("{}:{}", udphop_addr.host, udphop_addr.ports[0]);
+                    host_port
+                        .to_socket_addrs()
+                        .unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr))
+                        .next()
+                        .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
+                } else {
+                    self.config
+                        .addr
+                        .to_socket_addrs()
+                        .unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr))
+                        .next()
+                        .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
                 }
-                
-                let host_port = format!("{}:{}", udphop_addr.host, udphop_addr.ports[0]);
-                host_port.to_socket_addrs().unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr)).next().unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
-            } else {
-                self.config.addr.to_socket_addrs().unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr)).next().unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
-            }
-        }).await.clone();
-        
+            })
+            .await
+            .clone();
+
         let conn = self
             .quic_end
             .get_or_init(|| async {

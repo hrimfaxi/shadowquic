@@ -1,9 +1,9 @@
+use rand::Rng;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
-use rand::Rng;
 use tracing::{debug, error, info};
 
 use crate::utils::port_union::PortUnion;
@@ -35,22 +35,34 @@ impl UdpHopClientProxy {
         min_hop_interval: u32,
         max_hop_interval: u32,
     ) -> Result<SocketAddr, std::io::Error> {
-        let mut host_addrs = tokio::net::lookup_host(format!("{}:0", addr.host)).await?.collect::<Vec<_>>();
+        let mut host_addrs = tokio::net::lookup_host(format!("{}:0", addr.host))
+            .await?
+            .collect::<Vec<_>>();
         if host_addrs.is_empty() {
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Host not found"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Host not found",
+            ));
         }
         let base_addr = host_addrs[0];
         let is_ipv6 = base_addr.is_ipv6();
 
-        let local_socket = Arc::new(UdpSocket::bind(if is_ipv6 { "[::1]:0" } else { "127.0.0.1:0" }).await?);
+        let local_socket =
+            Arc::new(UdpSocket::bind(if is_ipv6 { "[::1]:0" } else { "127.0.0.1:0" }).await?);
         let local_port = local_socket.local_addr()?;
 
         let quinn_addr = Arc::new(RwLock::new(None));
-        
-        let current_socket = Arc::new(UdpSocket::bind(if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" }).await?);
+
+        let current_socket =
+            Arc::new(UdpSocket::bind(if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" }).await?);
         let current_target_port = addr.ports[rand::rng().random_range(0..addr.ports.len())];
 
-        info!("UdpHop initialized with {} target ports (from {} to {})", addr.ports.len(), addr.ports.first().unwrap_or(&0), addr.ports.last().unwrap_or(&0));
+        info!(
+            "UdpHop initialized with {} target ports (from {} to {})",
+            addr.ports.len(),
+            addr.ports.first().unwrap_or(&0),
+            addr.ports.last().unwrap_or(&0)
+        );
 
         let state = Arc::new(RwLock::new(ProxyState {
             current: current_socket.clone(),
@@ -59,12 +71,12 @@ impl UdpHopClientProxy {
         }));
 
         let ports = addr.ports.clone();
-        
+
         // Spawn hop loop
         let state_hop = state.clone();
         let local_socket_hop = local_socket.clone();
         let quinn_addr_hop = quinn_addr.clone();
-        
+
         tokio::spawn(async move {
             loop {
                 let interval = if min_hop_interval == max_hop_interval {
@@ -72,30 +84,35 @@ impl UdpHopClientProxy {
                 } else {
                     rand::rng().random_range(min_hop_interval..=max_hop_interval) as u64
                 };
-                
+
                 tokio::time::sleep(Duration::from_millis(interval)).await;
-                
-                let new_socket = match UdpSocket::bind(if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" }).await {
-                    Ok(s) => Arc::new(s),
-                    Err(e) => {
-                        error!("Failed to bind new socket for hop: {}", e);
-                        continue;
-                    }
-                };
-                
+
+                let new_socket =
+                    match UdpSocket::bind(if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" }).await {
+                        Ok(s) => Arc::new(s),
+                        Err(e) => {
+                            error!("Failed to bind new socket for hop: {}", e);
+                            continue;
+                        }
+                    };
+
                 let new_port = ports[rand::rng().random_range(0..ports.len())];
-                
+
                 let mut st = state_hop.write().await;
                 let old_current = st.current.clone();
                 st.prev = Some(old_current);
                 st.current = new_socket.clone();
                 st.current_target_port = new_port;
                 drop(st);
-                
+
                 debug!("Hopped to new socket, new target port: {}", new_port);
-                
+
                 // Spawn receiver for the new socket
-                spawn_internet_receiver(new_socket, local_socket_hop.clone(), quinn_addr_hop.clone());
+                spawn_internet_receiver(
+                    new_socket,
+                    local_socket_hop.clone(),
+                    quinn_addr_hop.clone(),
+                );
             }
         });
 
@@ -122,7 +139,10 @@ impl UdpHopClientProxy {
                         drop(st);
 
                         if len > 1500 {
-                            debug!("Warning: Large UDP packet received from local Quinn: {} bytes", len);
+                            debug!(
+                                "Warning: Large UDP packet received from local Quinn: {} bytes",
+                                len
+                            );
                         }
 
                         if let Err(e) = socket.send_to(&buf[..len], target).await {
