@@ -25,12 +25,14 @@ pub struct SunnyQuicClient {
     pub quic_conn: Option<SunnyQuicConn>,
     pub config: SunnyQuicClientCfg,
     pub quic_end: OnceCell<EndClient>,
+    pub local_proxy_addr: OnceCell<std::net::SocketAddr>,
 }
 impl SunnyQuicClient {
     pub fn new(cfg: SunnyQuicClientCfg) -> Self {
         Self {
             quic_conn: None,
             quic_end: OnceCell::new(),
+            local_proxy_addr: OnceCell::new(),
             config: cfg,
         }
     }
@@ -40,19 +42,39 @@ impl SunnyQuicClient {
     pub fn new_with_socket(cfg: SunnyQuicClientCfg, socket: UdpSocket) -> Result<Self, SError> {
         Ok(Self {
             quic_end: OnceCell::from(EndClient::new_with_socket(&cfg, socket)?),
+            local_proxy_addr: OnceCell::new(),
             quic_conn: None,
             config: cfg,
         })
     }
 
     pub async fn get_conn(&self) -> Result<SunnyQuicConn, SError> {
-        let addr = self
-            .config
-            .addr
-            .to_socket_addrs()
-            .unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr))
-            .next()
-            .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr));
+        let addr = self.local_proxy_addr.get_or_init(|| async {
+            let hop_interval = self.config.hop_interval.or(self.config.min_hop_interval).unwrap_or(0);
+            if let Ok(udphop_addr) = crate::utils::udphop::UdpHopAddr::parse(&self.config.addr) {
+                if udphop_addr.ports.len() > 1 || hop_interval > 0 {
+                    let min_interval = self.config.min_hop_interval.or(self.config.hop_interval).unwrap_or(30000);
+                    let max_interval = self.config.max_hop_interval.or(self.config.hop_interval).unwrap_or(30000);
+                    
+                    match crate::utils::udphop::UdpHopClientProxy::start(
+                        &udphop_addr,
+                        min_interval,
+                        max_interval,
+                    ).await {
+                        Ok(addr) => return addr,
+                        Err(e) => {
+                            tracing::error!("Failed to start UDP hop proxy: {}", e);
+                        }
+                    }
+                }
+                
+                let host_port = format!("{}:{}", udphop_addr.host, udphop_addr.ports[0]);
+                host_port.to_socket_addrs().unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr)).next().unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
+            } else {
+                self.config.addr.to_socket_addrs().unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr)).next().unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
+            }
+        }).await.clone();
+        
         let end = self
             .quic_end
             .get_or_init(|| async {
