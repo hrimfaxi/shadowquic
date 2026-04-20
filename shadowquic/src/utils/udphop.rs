@@ -65,6 +65,15 @@ fn select_hop_interval_ms(min_hop_interval: u32, max_hop_interval: u32) -> u64 {
     rand::rng().random_range(min_interval..=max_interval) as u64
 }
 
+async fn bind_and_connect_socket(
+    is_ipv6: bool,
+    target: SocketAddr,
+) -> Result<Arc<UdpSocket>, std::io::Error> {
+    let socket = Arc::new(UdpSocket::bind(if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" }).await?);
+    socket.connect(target).await?;
+    Ok(socket)
+}
+
 impl UdpHopClientProxy {
     pub async fn start(
         addr: &UdpHopAddr,
@@ -91,10 +100,11 @@ impl UdpHopClientProxy {
 
         let quinn_addr = Arc::new(RwLock::new(None));
 
-        let current_socket =
-            Arc::new(UdpSocket::bind(if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" }).await?);
         let current_target_port = addr.ports[rand::rng().random_range(0..addr.ports.len())];
+        let mut current_target = base_addr;
+        current_target.set_port(current_target_port);
 
+        let current_socket = bind_and_connect_socket(is_ipv6, current_target).await?;
         let current_task = spawn_internet_receiver(
             current_socket.clone(),
             local_socket.clone(),
@@ -128,16 +138,17 @@ impl UdpHopClientProxy {
                 let interval = select_hop_interval_ms(min_hop_interval, max_hop_interval);
                 tokio::time::sleep(Duration::from_millis(interval)).await;
 
-                let new_socket =
-                    match UdpSocket::bind(if is_ipv6 { "[::]:0" } else { "0.0.0.0:0" }).await {
-                        Ok(s) => Arc::new(s),
-                        Err(e) => {
-                            error!("Failed to bind new socket for hop: {}", e);
-                            continue;
-                        }
-                    };
-
                 let new_port = ports[rand::rng().random_range(0..ports.len())];
+                let mut new_target = base_addr;
+                new_target.set_port(new_port);
+
+                let new_socket = match bind_and_connect_socket(is_ipv6, new_target).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("Failed to bind/connect new socket for hop: {}", e);
+                        continue;
+                    }
+                };
 
                 let new_task = spawn_internet_receiver(
                     new_socket.clone(),
@@ -185,8 +196,6 @@ impl UdpHopClientProxy {
 
                         let st = state_local.read().await;
                         let socket = st.current.socket.clone();
-                        let mut target = base_addr;
-                        target.set_port(st.current_target_port);
                         drop(st);
 
                         if len > 1500 {
@@ -196,7 +205,7 @@ impl UdpHopClientProxy {
                             );
                         }
 
-                        if let Err(e) = socket.send_to(&buf[..len], target).await {
+                        if let Err(e) = socket.send(&buf[..len]).await {
                             error!("Failed to forward packet to internet: {}", e);
                         }
                     }
@@ -221,8 +230,8 @@ fn spawn_internet_receiver(
     tokio::spawn(async move {
         let mut buf = [0u8; 65535];
         loop {
-            match socket.recv_from(&mut buf).await {
-                Ok((len, _peer_addr)) => {
+            match socket.recv(&mut buf).await {
+                Ok(len) => {
                     let qa = quinn_addr.read().await;
                     if let Some(addr) = *qa
                         && let Err(e) = local_socket.send_to(&buf[..len], addr).await
