@@ -6,7 +6,7 @@ Shadowquic doesn't provide any authentication layer.
 Authentication is provided by JLS protocol.
 
 = Command
-Each proxy request is started with a command carried by a bistream.
+Each proxy request is started with a command carried by a bistream. Only client can initiate a command.
 
 ```plain
 +-------+---------------+
@@ -54,9 +54,9 @@ The design has heavily considerred #link("https://www.rfc-editor.org/rfc/rfc9298
 |   Variable    |      2       |
 +---------------+--------------+
 ```
-UDP Associate command is carried by bistream called *control stream*. For each datagram received from local socket or remote socket a control header consists of `SOCKSADDR` and `CONTEXT ID` is sent. If `CONTEXT ID` has been sent in the past which indicates the destination address has been cached, then this header could been skipped.
+UDP Associate command is carried by bistream called *control stream*. For each datagram received from local socket or remote socket a control header consists of `SOCKSADDR` and `CONTEXT ID` is sent. This control header is sent at least once for each new `CONTEXT ID`. The `CONTEXT ID` is used to identify the datagram stream of this destination.
 
-For each connection, implementation must maintain two `CONTEXT ID` spaces. One is for client to server direction. The other is for server to client direction. These two id spaces are independent. 
+For each connection, implementation must maintain two `CONTEXT ID` spaces. One is for client to server direction. The other is for server to client direction. These two id spaces are independent. The header of both direction is sent in the *same* control bistream.
 
 *control stream* doesn't send payload. The payload is carried by unistream or datagram extension chosen by user. 
 Control stream *MUST* remain alive during udp association task.
@@ -65,7 +65,7 @@ If control stream is terminated, the udp association task *must* also be termina
 
 UDP Associate command associates a remote socket to local socket. For each 
 destination from a local socket the datagram will be asigned a `CONTEXT ID` which is in *one-to-one
-corespondance* to 4 tuple (local udp ip:port, destination udp ip:port).
+corespondance* to destination udp ip:port.
 
 Each datagram payload will be prepended with a 2 bytes context ID. 
 
