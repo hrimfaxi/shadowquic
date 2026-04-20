@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::utils::port_union::PortUnion;
 
@@ -29,6 +29,20 @@ impl UdpHopAddr {
 }
 
 pub struct UdpHopClientProxy;
+
+fn select_hop_interval_ms(min_hop_interval: u32, max_hop_interval: u32) -> u64 {
+    let (min_interval, max_interval) = if min_hop_interval <= max_hop_interval {
+        (min_hop_interval, max_hop_interval)
+    } else {
+        warn!(
+            "Invalid hop interval range: min_hop_interval ({}) > max_hop_interval ({}), swapping them",
+            min_hop_interval, max_hop_interval
+        );
+        (max_hop_interval, min_hop_interval)
+    };
+
+    rand::rng().random_range(min_interval..=max_interval) as u64
+}
 
 impl UdpHopClientProxy {
     pub async fn start(
@@ -80,12 +94,7 @@ impl UdpHopClientProxy {
 
         tokio::spawn(async move {
             loop {
-                let interval = if min_hop_interval == max_hop_interval {
-                    min_hop_interval as u64
-                } else {
-                    rand::rng().random_range(min_hop_interval..=max_hop_interval) as u64
-                };
-
+                let interval = select_hop_interval_ms(min_hop_interval, max_hop_interval);
                 tokio::time::sleep(Duration::from_millis(interval)).await;
 
                 let new_socket =
