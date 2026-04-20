@@ -108,7 +108,7 @@ The UDP proxy scheme is greatly different from common protocol like TUIC/hysteri
 
     // Note: control stream
     content(
-      (col-client - 1.5, y - 0.8),
+      (col-client - 0, y - 0.5),
       anchor: "west",
       padding: 0.2,
       text(size: 7pt, fill: gray)[_control bistream stays open_],
@@ -153,7 +153,7 @@ The UDP proxy scheme is greatly different from common protocol like TUIC/hysteri
     msg(y, col-client, col-proxy, text(size: 8pt)[SOCKSADDR(B) + CID=2 \ _(control stream)_], color: eastern)
 
     // 10. Client sends to dest B
-    let y = -12.5
+    let y = -12.8
     msg(y, col-client, col-proxy, text(size: 8pt)[CID=2 | Payload \ _(datagram / unistream)_], color: orange)
 
     // 11. Proxy forwards to dest B
