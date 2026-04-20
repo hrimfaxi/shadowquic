@@ -1,5 +1,3 @@
-#![allow(clippy::while_let_loop, clippy::collapsible_if)]
-
 use rand::Rng;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -226,10 +224,10 @@ fn spawn_internet_receiver(
             match socket.recv_from(&mut buf).await {
                 Ok((len, _peer_addr)) => {
                     let qa = quinn_addr.read().await;
-                    if let Some(addr) = *qa {
-                        if let Err(e) = local_socket.send_to(&buf[..len], addr).await {
-                            error!("Failed to forward packet to local Quinn: {}", e);
-                        }
+                    if let Some(addr) = *qa
+                        && let Err(e) = local_socket.send_to(&buf[..len], addr).await
+                    {
+                        error!("Failed to forward packet to local Quinn: {}", e);
                     }
                 }
                 Err(e) => {
