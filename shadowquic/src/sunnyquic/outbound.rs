@@ -36,13 +36,19 @@ struct DrainingPath {
 pub struct SunnyQuicClient {
     pub quic_conn: Option<SunnyQuicConn>,
     pub config: SunnyQuicClientCfg,
-    pub quic_end: Option<EndClient>,
+
+    /// Cached endpoints split by address family.
+    pub quic_end_v4: Option<EndClient>,
+    pub quic_end_v6: Option<EndClient>,
+
     current_addr: Option<SocketAddr>,
+    current_target_port: Option<u16>,
     draining: Vec<DrainingPath>,
 
-    /// Flag indicating that a port hop should be performed on the next prepare_conn call
+    /// Flag indicating that a port hop should be performed on the next prepare_conn call.
     hop_requested: Arc<AtomicBool>,
-    /// graceful shutdown signal sender for hop timer
+
+    /// Graceful shutdown signal sender for hop timer.
     hop_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -102,8 +108,10 @@ impl SunnyQuicClient {
 
         Self {
             quic_conn: None,
-            quic_end: None,
+            quic_end_v4: None,
+            quic_end_v6: None,
             current_addr: None,
+            current_target_port: None,
             draining: Vec::new(),
             config: cfg,
             hop_requested,
@@ -116,44 +124,76 @@ impl SunnyQuicClient {
     }
 
     pub fn new_with_socket(cfg: SunnyQuicClientCfg, socket: UdpSocket) -> Result<Self, SError> {
-        let mut client = Self::new(cfg);
-        client.quic_end = Some(EndClient::new_with_socket(&client.config, socket)?);
-        Ok(client)
+        let local = socket.local_addr()?;
+        let end = EndClient::new_with_socket(&cfg, socket)?;
+
+        Ok(if local.is_ipv6() {
+            let mut client = Self::new(cfg);
+            client.quic_end_v6 = Some(end);
+            client
+        } else {
+            let mut client = Self::new(cfg);
+            client.quic_end_v4 = Some(end);
+            client
+        })
     }
 
-    fn resolve_base_addr(&self) -> SocketAddr {
-        self.config
+    fn resolve_addrs(&self) -> Vec<SocketAddr> {
+        let addrs: Vec<_> = self
+            .config
             .addr
             .to_socket_addrs()
             .unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr))
-            .next()
+            .collect();
+
+        if addrs.is_empty() {
+            panic!("resolve quic addr faile: {}", self.config.addr);
+        }
+
+        addrs
+    }
+
+    fn base_port(&self) -> u16 {
+        self.resolve_addrs()
+            .first()
+            .map(SocketAddr::port)
             .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
     }
 
-    fn select_hop_addr(&self) -> SocketAddr {
-        let base_addr = self.resolve_base_addr();
-        let ip = base_addr.ip();
-        let base_port = base_addr.port();
-
-        let target_port = match &self.config.port_hop {
-            Some(port_hop) => {
-                let mut rng = rand::rng();
+    fn select_target_port(&self) -> u16 {
+        match (&self.config.port_hop, self.current_target_port) {
+            (Some(port_hop), current_port) => {
                 let (start, end) = (port_hop.range.start, port_hop.range.end);
-                let port = rng.random_range(start..=end);
-                debug!("selected random port {} (range: {}-{})", port, start, end);
-                port
-            }
-            None => base_port,
-        };
+                let mut rng = rand::rng();
 
-        SocketAddr::new(ip, target_port)
+                let mut selected = current_port.unwrap_or(start);
+
+                for _ in 0..8 {
+                    let port = rng.random_range(start..=end);
+                    selected = port;
+                    if Some(port) != current_port || start == end {
+                        break;
+                    }
+                }
+
+                debug!(
+                    "selected target port {} (range: {}-{})",
+                    selected, start, end
+                );
+                selected
+            }
+            (None, _) => self.base_port(),
+        }
     }
 
-    async fn build_endpoint(&self) -> Result<EndClient, SError> {
-        match self.init_endpoint(true).await {
-            Ok(ep) => Ok(ep),
-            Err(_) => self.init_endpoint(false).await,
-        }
+    fn candidate_addrs_for_port(&self, port: u16) -> Vec<SocketAddr> {
+        self.resolve_addrs()
+            .into_iter()
+            .map(|mut addr| {
+                addr.set_port(port);
+                addr
+            })
+            .collect()
     }
 
     fn wrap_conn(raw: <EndClient as QuicClient>::C) -> SunnyQuicConn {
@@ -194,10 +234,64 @@ impl SunnyQuicClient {
         Ok(conn)
     }
 
-    async fn build_path(&self, addr: SocketAddr) -> Result<(EndClient, SunnyQuicConn), SError> {
-        let end = self.build_endpoint().await?;
-        let conn = self.connect_with_endpoint(&end, addr).await?;
-        Ok((end, conn))
+    async fn build_path_for_addr(
+        &mut self,
+        addr: SocketAddr,
+    ) -> Result<(EndClient, SunnyQuicConn), SError> {
+        if addr.is_ipv6() {
+            if self.quic_end_v6.is_none() {
+                self.quic_end_v6 = Some(self.init_endpoint(true).await?);
+            }
+
+            let end = self
+                .quic_end_v6
+                .take()
+                .expect("missing cached ipv6 endpoint after initialization");
+
+            let conn = self.connect_with_endpoint(&end, addr).await?;
+            Ok((end, conn))
+        } else {
+            if self.quic_end_v4.is_none() {
+                self.quic_end_v4 = Some(self.init_endpoint(false).await?);
+            }
+
+            let end = self
+                .quic_end_v4
+                .take()
+                .expect("missing cached ipv4 endpoint after initialization");
+
+            let conn = self.connect_with_endpoint(&end, addr).await?;
+            Ok((end, conn))
+        }
+    }
+
+    async fn build_path_for_port(
+        &mut self,
+        port: u16,
+    ) -> Result<(EndClient, SunnyQuicConn, SocketAddr), SError> {
+        let mut last_err = None;
+
+        for addr in self.candidate_addrs_for_port(port) {
+            match self.build_path_for_addr(addr).await {
+                Ok((end, conn)) => return Ok((end, conn, addr)),
+                Err(e) => {
+                    error!("connect to {} failed: {}", addr, e);
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            std::io::Error::other("no usable quic target address for selected port").into()
+        }))
+    }
+
+    fn restore_active_endpoint(&mut self, addr: SocketAddr, end: EndClient) {
+        if addr.is_ipv6() {
+            self.quic_end_v6 = Some(end);
+        } else {
+            self.quic_end_v4 = Some(end);
+        }
     }
 
     fn cleanup_draining(&mut self) {
@@ -243,18 +337,23 @@ impl SunnyQuicClient {
     }
 
     async fn hop_port(&mut self) -> Result<(), SError> {
-        let addr = self.select_hop_addr();
-        info!("starting soft port hop to server {}", addr);
+        let new_port = self.select_target_port();
+        info!("starting soft port hop to target port {}", new_port);
 
         // 1. Build new path first. If this fails, the old path remains intact.
-        let (new_end, new_conn) = self.build_path(addr).await?;
+        let (new_end, new_conn, new_addr) = self.build_path_for_port(new_port).await?;
 
         // 2. Move old active path into draining instead of closing it immediately.
         if let Some(old_conn) = self.quic_conn.take() {
-            if let Some(old_end) = self.quic_end.take() {
-                let old_addr = self
-                    .current_addr
-                    .unwrap_or_else(|| self.resolve_base_addr());
+            let old_addr = self.current_addr.unwrap_or(new_addr);
+
+            let old_end = if old_addr.is_ipv6() {
+                self.quic_end_v6.take()
+            } else {
+                self.quic_end_v4.take()
+            };
+
+            if let Some(old_end) = old_end {
                 debug!("moving old quic path {} into draining set", old_addr);
 
                 self.draining.push(DrainingPath {
@@ -264,9 +363,8 @@ impl SunnyQuicClient {
                     since: Instant::now(),
                 });
             } else {
-                // Should not normally happen, but if it does, we cannot keep the old path alive safely.
                 warn!(
-                    "active quic connection exists without endpoint; closing old path during hop"
+                    "active quic connection exists without matching endpoint; closing old path during hop"
                 );
                 old_conn
                     .conn
@@ -275,14 +373,15 @@ impl SunnyQuicClient {
         }
 
         // 3. Switch new path to active.
-        self.quic_end = Some(new_end);
+        self.restore_active_endpoint(new_addr, new_end);
         self.quic_conn = Some(new_conn);
-        self.current_addr = Some(addr);
+        self.current_addr = Some(new_addr);
+        self.current_target_port = Some(new_port);
 
         // 4. Opportunistic cleanup.
         self.cleanup_draining();
 
-        debug!("soft port hopped to server {}", addr);
+        debug!("soft port hopped to server {}", new_addr);
         Ok(())
     }
 
@@ -291,26 +390,14 @@ impl SunnyQuicClient {
             return Ok(());
         }
 
-        let addr = self
-            .current_addr
-            .unwrap_or_else(|| self.resolve_base_addr());
+        let port = self.current_target_port.unwrap_or_else(|| self.base_port());
+        let (end, conn, addr) = self.build_path_for_port(port).await?;
 
-        let conn = if let Some(end) = self.quic_end.as_ref() {
-            Some(self.connect_with_endpoint(end, addr).await?)
-        } else {
-            None
-        };
-
-        if let Some(conn) = conn {
-            self.quic_conn = Some(conn);
-            self.current_addr = Some(addr);
-            return Ok(());
-        }
-
-        let (end, conn) = self.build_path(addr).await?;
-        self.quic_end = Some(end);
+        self.restore_active_endpoint(addr, end);
         self.quic_conn = Some(conn);
         self.current_addr = Some(addr);
+        self.current_target_port = Some(port);
+
         Ok(())
     }
 
@@ -318,8 +405,6 @@ impl SunnyQuicClient {
         // Clean up old drained paths first.
         self.cleanup_draining();
 
-        // If active connection is already closed, drop only the active connection.
-        // Keep the active endpoint so normal reconnect behavior stays unchanged.
         let active_closed_reason = self
             .quic_conn
             .as_ref()
@@ -328,9 +413,16 @@ impl SunnyQuicClient {
         if let Some(reason) = active_closed_reason {
             debug!("active quic connection closed due to {}", reason);
             self.quic_conn = None;
+
+            if let Some(addr) = self.current_addr.take() {
+                if addr.is_ipv6() {
+                    self.quic_end_v6 = None;
+                } else {
+                    self.quic_end_v4 = None;
+                }
+            }
         }
 
-        // Process pending hop request using make-before-break.
         if self.hop_requested.swap(false, Ordering::SeqCst) {
             match self.hop_port().await {
                 Ok(()) => {}
@@ -338,7 +430,6 @@ impl SunnyQuicClient {
             }
         }
 
-        // Ensure there is an active connection.
         self.ensure_active_conn().await?;
 
         Ok(())
