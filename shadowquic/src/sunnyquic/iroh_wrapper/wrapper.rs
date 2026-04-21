@@ -39,6 +39,7 @@ use crate::{
 };
 
 pub type Connection = iroh_quinn::Connection;
+#[derive(Clone)]
 pub struct Endpoint<SC> {
     inner: iroh_quinn::Endpoint,
     cfg: Arc<SC>,

@@ -33,6 +33,7 @@ use crate::{
 };
 
 pub type Connection = quinn::Connection;
+#[derive(Clone)]
 pub struct Endpoint {
     inner: quinn::Endpoint,
     zero_rtt: bool,
