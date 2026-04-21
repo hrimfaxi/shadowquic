@@ -179,10 +179,6 @@ pub struct ShadowQuicServerCfg {
     /// For stable udp network, it's better to disable it and set a proper initial mtu
     #[serde(default = "default_mtu_discovery")]
     pub mtu_discovery: bool,
-
-    /// Brutal server configuration
-    #[serde(default)]
-    pub brutal: Option<BrutalParams>,
 }
 
 /// Jls upstream configuration
@@ -218,7 +214,6 @@ impl Default for ShadowQuicServerCfg {
             server_name: None,
             gso: default_gso(),
             mtu_discovery: default_mtu_discovery(),
-            brutal: None,
         }
     }
 }
