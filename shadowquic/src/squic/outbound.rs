@@ -2,7 +2,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::Instrument;
 use tracing::{Level, debug, error, info, span, trace};
 
@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::{SQConn, inbound::Unsplit};
+
 /// Handling a proxy request and starting proxy task with given squic connection
 pub async fn handle_request<C: QuicConnection>(
     req: ProxyRequest,
@@ -23,6 +24,7 @@ pub async fn handle_request<C: QuicConnection>(
 ) -> Result<(), SError> {
     let (mut send, recv, id) = QuicConnection::open_bi(&conn.conn).await?;
     let _span = span!(Level::TRACE, "bistream", id = id);
+
     let fut = async move {
         match req {
             crate::ProxyRequest::Tcp(mut tcp_session) => {
@@ -37,25 +39,73 @@ pub async fn handle_request<C: QuicConnection>(
                     &mut tcp_session.stream,
                 )
                 .await?;
+
                 info!(
                     "request:{} finished, upload:{}bytes,download:{}bytes",
                     tcp_session.dst, u.1, u.0
                 );
             }
+
+            crate::ProxyRequest::Http(mut http_session) => {
+                match &http_session.dst.addr {
+                    crate::msgs::socks5::AddrOrDomain::V4(ip) => {
+                        trace!(
+                            "http dst is ipv4: {}:{}",
+                            std::net::Ipv4Addr::from(*ip),
+                            http_session.dst.port
+                        );
+                    }
+                    crate::msgs::socks5::AddrOrDomain::V6(ip) => {
+                        trace!(
+                            "http dst is ipv6: [{}]:{}",
+                            std::net::Ipv6Addr::from(*ip),
+                            http_session.dst.port
+                        );
+                    }
+                    crate::msgs::socks5::AddrOrDomain::Domain(host) => {
+                        let host =
+                            std::str::from_utf8(&host.contents).unwrap_or("<invalid-utf8-domain>");
+                        trace!("http dst is domain: {}:{}", host, http_session.dst.port);
+                    }
+                }
+
+                debug!("bistream opened for http dst:{}", http_session.dst.clone());
+
+                let req = SQReq::SQConnect(http_session.dst.clone());
+                req.encode(&mut send).await?;
+                send.write_all(&http_session.first_packet).await?;
+                send.flush().await?;
+
+                let u = tokio::io::copy_bidirectional(
+                    &mut Unsplit { s: send, r: recv },
+                    &mut http_session.stream,
+                )
+                .await?;
+
+                info!(
+                    "http request:{} finished, upload:{}bytes,download:{}bytes",
+                    http_session.dst, u.1, u.0
+                );
+            }
+
             crate::ProxyRequest::Udp(udp_session) => {
                 info!(
                     "bistream opened for udp dst:{}",
                     udp_session.bind_addr.clone()
                 );
+
                 let req = if over_stream {
                     SQReq::SQAssociatOverStream(udp_session.bind_addr.clone())
                 } else {
                     SQReq::SQAssociatOverDatagram(udp_session.bind_addr.clone())
                 };
+
                 req.encode(&mut send).await?;
                 trace!("udp associate req header sent");
+
                 let fut2 = handle_udp_recv_ctrl(recv, udp_session.send.clone(), conn.clone());
                 let fut1 = handle_udp_send(send, udp_session.recv, conn, over_stream);
+
                 // control stream, in socks5 inbound, end of control stream
                 // means end of udp association.
                 let fut3 = async {
