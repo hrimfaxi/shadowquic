@@ -32,6 +32,9 @@ use crate::{
     },
 };
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::utils::dual_socket::{create_marked_udp_socket, try_apply_fwmark};
+
 pub type Connection = quinn::Connection;
 #[derive(Clone)]
 pub struct Endpoint {
@@ -153,6 +156,11 @@ impl QuicClient for Endpoint {
             socket.bind(&bind_addr.into())?;
             socket
         };
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(mark) = cfg.fwmark {
+            try_apply_fwmark(&socket, mark);
+        }
 
         #[cfg(target_os = "android")]
         if let Some(path) = &cfg.protect_path {
@@ -325,6 +333,37 @@ pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
     config
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn create_quinn_server_endpoint(
+    config: quinn::ServerConfig,
+    bind_addr: std::net::SocketAddr,
+    fwmark: Option<u32>,
+) -> std::io::Result<quinn::Endpoint> {
+    if let Some(mark) = fwmark {
+        let udp_socket = create_marked_udp_socket(bind_addr, mark)?;
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| std::io::Error::other("no async runtime found"))?;
+
+        quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(config),
+            udp_socket,
+            runtime,
+        )
+    } else {
+        quinn::Endpoint::server(config, bind_addr)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn create_quinn_server_endpoint(
+    config: quinn::ServerConfig,
+    bind_addr: std::net::SocketAddr,
+    _fwmark: Option<u32>,
+) -> std::io::Result<quinn::Endpoint> {
+    quinn::Endpoint::server(config, bind_addr)
+}
+
 #[async_trait]
 impl QuicServer for Endpoint {
     type C = Connection;
@@ -419,7 +458,8 @@ impl QuicServer for Endpoint {
 
         config.transport_config(Arc::new(tp_cfg));
 
-        let endpoint = quinn::Endpoint::server(config, cfg.bind_addr)?;
+        let endpoint = create_quinn_server_endpoint(config, cfg.bind_addr, cfg.fwmark)?;
+
         Ok(Endpoint {
             inner: endpoint,
             zero_rtt: cfg.zero_rtt,
