@@ -75,6 +75,10 @@ pub struct SunnyQuicServerCfg {
     /// Brutal server configuration
     #[serde(default)]
     pub brutal: Option<BrutalParams>,
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[serde(default)]
+    pub fwmark: Option<u32>,
 }
 
 impl Default for SunnyQuicServerCfg {
@@ -94,6 +98,8 @@ impl Default for SunnyQuicServerCfg {
             mtu_discovery: default_mtu_discovery(),
             gso: default_gso(),
             brutal: None,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            fwmark: None,
         }
     }
 }
@@ -121,6 +127,8 @@ impl Default for SunnyQuicClientCfg {
             rebind_interval: None,
             min_rebind_interval: None,
             max_rebind_interval: None,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            fwmark: None,
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
         }
@@ -219,6 +227,10 @@ pub struct SunnyQuicClientCfg {
     pub min_rebind_interval: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_duration_ms")]
     pub max_rebind_interval: Option<u32>,
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[serde(default)]
+    pub fwmark: Option<u32>,
 
     /// Android Only. the unix socket path for protecting android socket
     #[cfg(target_os = "android")]
