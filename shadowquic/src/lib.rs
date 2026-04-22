@@ -14,6 +14,8 @@ use tracing::error;
 pub mod config;
 pub mod direct;
 pub mod error;
+pub mod http;
+pub mod mixed;
 pub mod msgs;
 pub mod quic;
 pub mod shadowquic;
