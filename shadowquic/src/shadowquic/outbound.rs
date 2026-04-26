@@ -80,6 +80,7 @@ impl ShadowQuicClient {
     fn spawn_rebind_task(
         end: EndClient,
         rebind_interval: Option<(u32, u32)>,
+        bind_ipv6: bool,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let (min_ms, max_ms) = rebind_interval?;
         let (lo, hi) = if min_ms <= max_ms {
@@ -99,7 +100,7 @@ impl ShadowQuicClient {
             format_duration(hi)
         );
 
-        let bind_addr = "[::]:0";
+        let bind_addr = if bind_ipv6 { "[::]:0" } else { "0.0.0.0:0" };
 
         let handle = tokio::spawn(async move {
             loop {
@@ -136,14 +137,18 @@ impl ShadowQuicClient {
         let (end, _handle) = self
             .quic_end
             .get_or_init(|| async {
-                let end = match self.init_endpoint(true).await {
-                    Ok(end) => end,
-                    Err(_) => self
-                        .init_endpoint(false)
-                        .await
-                        .expect("error during initialize quic endpoint"),
+                let (end, is_ipv6) = match self.init_endpoint(true).await {
+                    Ok(end) => (end, true),
+                    Err(_) => {
+                        let end = self
+                            .init_endpoint(false)
+                            .await
+                            .expect("error during initialize quic endpoint");
+                        (end, false)
+                    }
                 };
-                let handle = Self::spawn_rebind_task(end.clone(), self.rebind_interval_range());
+                let handle =
+                    Self::spawn_rebind_task(end.clone(), self.rebind_interval_range(), is_ipv6);
                 (end, handle)
             })
             .await;
