@@ -304,7 +304,7 @@ fn parse_absolute_http_uri(target: &str) -> Result<ParsedHttpUri, SError> {
         .strip_prefix("http://")
         .ok_or_else(|| SError::SocksError("only absolute http:// URI is supported".into()))?;
 
-    let split_idx = rest.find(|c| c == '/' || c == '?');
+    let split_idx = rest.find(['/', '?']);
 
     let (authority, path_and_query) = match split_idx {
         Some(idx) => {
