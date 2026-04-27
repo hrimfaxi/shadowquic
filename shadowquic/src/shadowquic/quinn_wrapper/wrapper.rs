@@ -1,6 +1,8 @@
 use std::{io, net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
 
 use super::brutal::BrutalConfig;
+use super::rebind_endpoint::Rebindable;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use quinn::rustls::{
@@ -43,6 +45,12 @@ impl Deref for Endpoint {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+impl Rebindable for Endpoint {
+    fn rebind(&self, socket: std::net::UdpSocket) -> Result<(), std::io::Error> {
+        self.inner.rebind(socket)
     }
 }
 
