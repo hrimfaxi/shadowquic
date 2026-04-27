@@ -5,7 +5,7 @@ use tracing::{error, info, warn};
 
 use crate::config::format_duration;
 
-/// QUIC endpoint capable of socket rebinding (quinn-specific feature)
+/// QUIC endpoint socket rebinding abstraction
 pub trait Rebindable {
     fn rebind(&self, socket: UdpSocket) -> Result<(), std::io::Error>;
 }

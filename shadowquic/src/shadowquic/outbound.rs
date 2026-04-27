@@ -6,11 +6,14 @@ use std::{
 use tokio::sync::{OnceCell, SetOnce};
 
 use super::quinn_wrapper::EndClient;
-use super::quinn_wrapper::rebind_endpoint::{RebindConfig, RebindEndpoint};
 use tracing::{error, info};
 
 use crate::{
-    Outbound, config::ShadowQuicClientCfg, error::SError, quic::QuicClient,
+    Outbound,
+    config::ShadowQuicClientCfg,
+    error::SError,
+    quic::QuicClient,
+    rebind::{RebindConfig, RebindEndpoint},
     squic::outbound::handle_request,
 };
 

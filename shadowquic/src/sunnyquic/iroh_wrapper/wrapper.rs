@@ -25,8 +25,6 @@ use rustls::ServerConfig as RustlsServerConfig;
 
 use iroh_quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 
-use super::rebind_endpoint::Rebindable;
-
 use crate::{
     config::{
         CipherSuitePreference, CongestionControl, SunnyQuicClientCfg, SunnyQuicServerCfg,
@@ -37,6 +35,7 @@ use crate::{
         MAX_DATAGRAM_WINDOW, MAX_SEND_WINDOW, MAX_STREAM_WINDOW, QuicClient, QuicConnection,
         QuicErrorRepr, QuicServer,
     },
+    rebind::Rebindable,
     sunnyquic::dynamic_cert::DynamicCertResolver,
 };
 

@@ -6,7 +6,6 @@ use std::{
 use tokio::sync::{OnceCell, SetOnce};
 
 use super::EndClient;
-use super::iroh_wrapper::rebind_endpoint::{RebindConfig, RebindEndpoint};
 use tracing::{error, info};
 
 use crate::{
@@ -14,6 +13,7 @@ use crate::{
     config::SunnyQuicClientCfg,
     error::SError,
     quic::{QuicClient, QuicConnection},
+    rebind::{RebindConfig, RebindEndpoint},
     squic::{auth_sunny, outbound::handle_request},
     sunnyquic::gen_sunny_user_hash,
 };
