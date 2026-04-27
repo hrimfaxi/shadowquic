@@ -1,32 +1,27 @@
 use async_trait::async_trait;
 use std::{
-    net::{SocketAddr, ToSocketAddrs, UdpSocket},
+    net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
 use tokio::sync::{OnceCell, SetOnce};
 
 use super::quinn_wrapper::EndClient;
-use tracing::{error, info, warn};
+use super::quinn_wrapper::rebind_endpoint::{RebindConfig, RebindEndpoint};
+use tracing::{error, info};
 
 use crate::{
-    Outbound,
-    config::{ShadowQuicClientCfg, format_duration},
-    error::SError,
-    quic::QuicClient,
+    Outbound, config::ShadowQuicClientCfg, error::SError, quic::QuicClient,
     squic::outbound::handle_request,
 };
 
 use crate::squic::{IDStore, SQConn, handle_udp_packet_recv};
-use rand::Rng;
-use std::time::Duration;
-use tokio::time::sleep;
 
 pub type ShadowQuicConn = SQConn<<EndClient as QuicClient>::C>;
 
 pub struct ShadowQuicClient {
     pub quic_conn: Option<ShadowQuicConn>,
     pub config: ShadowQuicClientCfg,
-    pub quic_end: OnceCell<(EndClient, Option<tokio::task::JoinHandle<()>>)>,
+    pub quic_end: OnceCell<RebindEndpoint<EndClient>>,
 }
 impl ShadowQuicClient {
     pub fn new(cfg: ShadowQuicClientCfg) -> Self {
@@ -38,13 +33,6 @@ impl ShadowQuicClient {
     }
     pub async fn init_endpoint(&self, ipv6: bool) -> Result<EndClient, SError> {
         EndClient::new(&self.config, ipv6).await
-    }
-    pub fn new_with_socket(cfg: ShadowQuicClientCfg, socket: UdpSocket) -> Result<Self, SError> {
-        Ok(Self {
-            quic_conn: None,
-            quic_end: OnceCell::from((EndClient::new_with_socket(&cfg, socket)?, None)),
-            config: cfg,
-        })
     }
 
     fn resolve_addrs(&self) -> Vec<SocketAddr> {
@@ -60,81 +48,8 @@ impl ShadowQuicClient {
         addrs
     }
 
-    fn rebind_interval_range(&self) -> Option<(u32, u32)> {
-        let min = self
-            .config
-            .min_rebind_interval
-            .or(self.config.rebind_interval);
-        let max = self
-            .config
-            .max_rebind_interval
-            .or(self.config.rebind_interval);
-        match (min, max) {
-            (None, None) => None,
-            (Some(m), None) => Some((m, m)),
-            (None, Some(m)) => Some((m, m)),
-            (Some(a), Some(b)) => Some((a, b)),
-        }
-    }
-
-    fn spawn_rebind_task(
-        end: EndClient,
-        rebind_interval: Option<(u32, u32)>,
-        bind_ipv6: bool,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        let (min_ms, max_ms) = rebind_interval?;
-        let (lo, hi) = if min_ms <= max_ms {
-            (min_ms, max_ms)
-        } else {
-            (max_ms, min_ms)
-        };
-
-        if hi == 0 {
-            warn!("rebind_interval is 0, disabling rebind");
-            return None;
-        }
-
-        info!(
-            "rebind enabled (interval: {} - {})",
-            format_duration(lo),
-            format_duration(hi)
-        );
-
-        let bind_addr = if bind_ipv6 { "[::]:0" } else { "0.0.0.0:0" };
-
-        let handle = tokio::spawn(async move {
-            loop {
-                let interval_ms = {
-                    let mut rng = rand::rng();
-                    rng.random_range(lo..=hi) as u64
-                };
-                sleep(Duration::from_millis(interval_ms)).await;
-
-                match tokio::net::UdpSocket::bind(bind_addr).await {
-                    Ok(tokio_socket) => match tokio_socket.into_std() {
-                        Ok(std_socket) => {
-                            if let Err(e) = end.rebind(std_socket) {
-                                error!("rebind failed: {}", e);
-                            } else {
-                                info!("rebound to new local port");
-                            }
-                        }
-                        Err(e) => {
-                            error!("into_std failed for rebind socket: {}", e);
-                        }
-                    },
-                    Err(e) => {
-                        error!("failed to bind socket for rebind: {}", e);
-                    }
-                }
-            }
-        });
-
-        Some(handle)
-    }
-
     async fn connect_addr(&self, addr: SocketAddr) -> Result<ShadowQuicConn, SError> {
-        let (end, _handle) = self
+        let rebind = self
             .quic_end
             .get_or_init(|| async {
                 let (end, is_ipv6) = match self.init_endpoint(true).await {
@@ -147,13 +62,20 @@ impl ShadowQuicClient {
                         (end, false)
                     }
                 };
-                let handle =
-                    Self::spawn_rebind_task(end.clone(), self.rebind_interval_range(), is_ipv6);
-                (end, handle)
+
+                RebindEndpoint::with_rebind(
+                    end,
+                    RebindConfig {
+                        interval_ms: self.config.rebind_interval,
+                        min_ms: self.config.min_rebind_interval,
+                        max_ms: self.config.max_rebind_interval,
+                    },
+                    is_ipv6,
+                )
             })
             .await;
 
-        let conn = QuicClient::connect(end, addr, &self.config.server_name).await?;
+        let conn = QuicClient::connect(rebind.endpoint(), addr, &self.config.server_name).await?;
 
         let conn = SQConn {
             conn,
@@ -205,14 +127,6 @@ impl ShadowQuicClient {
             self.quic_conn = Some(self.get_conn().await?);
         }
         Ok(())
-    }
-}
-
-impl Drop for ShadowQuicClient {
-    fn drop(&mut self) {
-        if let Some((_, Some(handle))) = self.quic_end.get() {
-            handle.abort();
-        }
     }
 }
 
