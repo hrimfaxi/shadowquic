@@ -2494,25 +2494,6 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.7"
-source = "git+https://github.com/hrimfaxi/quinn-jls?branch=fix-spurious-curl-handshake-error#f3825576c456699807a463c8a4eaffaf1651a918"
-dependencies = [
- "bytes",
- "cfg_aliases",
- "pin-project-lite",
- "quinn-proto 0.11.10 (git+https://github.com/hrimfaxi/quinn-jls?branch=fix-spurious-curl-handshake-error)",
- "quinn-udp 0.5.10 (git+https://github.com/hrimfaxi/quinn-jls?branch=fix-spurious-curl-handshake-error)",
- "rustc-hash",
- "rustls 0.23.36 (git+https://github.com/hrimfaxi/rustls-jls?branch=fix-spurious-curl-handshake-error)",
- "socket2 0.5.10",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "quinn"
-version = "0.11.7"
 source = "git+https://github.com/spongebob888/quinn-jls?branch=jls-dev#670e73bdb0a4a5d8d49c76f643154ce412bc7dcf"
 dependencies = [
  "bytes",
@@ -2530,20 +2511,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "quinn-proto"
-version = "0.11.10"
-source = "git+https://github.com/hrimfaxi/quinn-jls?branch=fix-spurious-curl-handshake-error#f3825576c456699807a463c8a4eaffaf1651a918"
+name = "quinn"
+version = "0.11.7"
+source = "git+https://github.com/hrimfaxi/quinn-jls?branch=test#2f396590e9a1c8d84a6b6ae988b7196dffe83e2d"
 dependencies = [
  "bytes",
- "getrandom 0.3.4",
- "rand",
- "ring",
+ "cfg_aliases",
+ "pin-project-lite",
+ "quinn-proto 0.11.10 (git+https://github.com/hrimfaxi/quinn-jls?branch=test)",
+ "quinn-udp 0.5.10 (git+https://github.com/hrimfaxi/quinn-jls?branch=test)",
  "rustc-hash",
- "rustls 0.23.36 (git+https://github.com/hrimfaxi/rustls-jls?branch=fix-spurious-curl-handshake-error)",
- "rustls-pki-types",
- "slab",
+ "rustls 0.23.36 (git+https://github.com/hrimfaxi/rustls-jls?branch=test)",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
- "tinyvec",
+ "tokio",
  "tracing",
  "web-time",
 ]
@@ -2568,16 +2549,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "quinn-udp"
-version = "0.5.10"
-source = "git+https://github.com/hrimfaxi/quinn-jls?branch=fix-spurious-curl-handshake-error#f3825576c456699807a463c8a4eaffaf1651a918"
+name = "quinn-proto"
+version = "0.11.10"
+source = "git+https://github.com/hrimfaxi/quinn-jls?branch=test#2f396590e9a1c8d84a6b6ae988b7196dffe83e2d"
 dependencies = [
- "cfg_aliases",
- "libc",
- "once_cell",
- "socket2 0.5.10",
+ "bytes",
+ "getrandom 0.3.4",
+ "rand",
+ "ring",
+ "rustc-hash",
+ "rustls 0.23.36 (git+https://github.com/hrimfaxi/rustls-jls?branch=test)",
+ "rustls-pki-types",
+ "slab",
+ "thiserror 2.0.18",
+ "tinyvec",
  "tracing",
- "windows-sys 0.52.0",
+ "web-time",
 ]
 
 [[package]]
@@ -2591,6 +2578,19 @@ dependencies = [
  "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "quinn-udp"
+version = "0.5.10"
+source = "git+https://github.com/hrimfaxi/quinn-jls?branch=test#2f396590e9a1c8d84a6b6ae988b7196dffe83e2d"
+dependencies = [
+ "cfg_aliases",
+ "libc",
+ "once_cell",
+ "socket2 0.5.10",
+ "tracing",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2804,10 +2804,9 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.36"
-source = "git+https://github.com/hrimfaxi/rustls-jls?branch=fix-spurious-curl-handshake-error#b63b92f8b704ccaf92c37b61ad53578b899c0f19"
+source = "git+https://github.com/spongebob888/rustls-jls?branch=jls-dev#459f14c849f4fd5986aeeb80a7f52dca785bf80c"
 dependencies = [
  "aes-gcm",
- "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -2819,9 +2818,10 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.36"
-source = "git+https://github.com/spongebob888/rustls-jls?branch=jls-dev#459f14c849f4fd5986aeeb80a7f52dca785bf80c"
+source = "git+https://github.com/hrimfaxi/rustls-jls?branch=test#f8c4375c492bfb3686f0cb28ab1ad7a5f92180d8"
 dependencies = [
  "aes-gcm",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3116,13 +3116,13 @@ dependencies = [
  "notify",
  "qbase",
  "qevent",
- "quinn 0.11.7 (git+https://github.com/hrimfaxi/quinn-jls?branch=fix-spurious-curl-handshake-error)",
- "quinn-proto 0.11.10 (git+https://github.com/hrimfaxi/quinn-jls?branch=fix-spurious-curl-handshake-error)",
+ "quinn 0.11.7 (git+https://github.com/hrimfaxi/quinn-jls?branch=test)",
+ "quinn-proto 0.11.10 (git+https://github.com/hrimfaxi/quinn-jls?branch=test)",
  "qunreliable",
  "rand",
  "rcgen",
  "ring",
- "rustls 0.23.36 (git+https://github.com/hrimfaxi/rustls-jls?branch=fix-spurious-curl-handshake-error)",
+ "rustls 0.23.36 (git+https://github.com/hrimfaxi/rustls-jls?branch=test)",
  "rustls 0.23.37",
  "rustls-native-certs",
  "sendfd",
