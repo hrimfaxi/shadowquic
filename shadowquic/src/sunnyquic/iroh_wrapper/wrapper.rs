@@ -25,6 +25,8 @@ use rustls::ServerConfig as RustlsServerConfig;
 
 use iroh_quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 
+use super::rebind_endpoint::Rebindable;
+
 use crate::{
     config::{
         CipherSuitePreference, CongestionControl, SunnyQuicClientCfg, SunnyQuicServerCfg,
@@ -52,6 +54,12 @@ impl<SC> Deref for Endpoint<SC> {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+impl<SC> Rebindable for Endpoint<SC> {
+    fn rebind(&self, socket: std::net::UdpSocket) -> Result<(), std::io::Error> {
+        self.inner.rebind(socket)
     }
 }
 
