@@ -23,9 +23,10 @@ tracing = "0.1.44"
 time = { version = "=0.3.46", features = ["macros", "local-offset"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "ansi", "time", "local-time"]}
 #quinn = { package = "quinn-jls", version = "0.3.3", default-features = false, features = ["runtime-tokio", "rustls-ring"],optional = true}
-quinn = { path = "/home/hrimfaxi/quinn-jls/quinn", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true}
+#quinn = { path = "/home/hrimfaxi/quinn-jls/quinn", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true}
+quinn = { package = "quinn", git = "https://github.com/hrimfaxi/quinn-jls", branch = "fix-spurious-curl-handshake-error", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true}
 # quinn_proto = { package = "quinn-proto-jls", version = "0.3.3", default-features = false, features = ["rustls-ring"],optional = true}
-quinn_proto = { package = "quinn-proto", path = "/home/hrimfaxi/quinn-jls/quinn-proto", default-features = false, features = ["rustls-ring"],optional = true}
+quinn_proto = { package = "quinn-proto", git = "https://github.com/hrimfaxi/quinn-jls", branch = "fix-spurious-curl-handshake-error", default-features = false, features = ["rustls-ring"],optional = true}
 
 #brutal-core = { git = "https://github.com/hrimfaxi/brutal_quinn.git", branch = "master" }
 brutal-core = { version = "0.1.0" }
