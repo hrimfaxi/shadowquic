@@ -277,6 +277,10 @@ pub struct ShadowQuicServerCfg {
     /// For stable udp network, it's better to disable it and set a proper initial mtu
     #[serde(default = "default_mtu_discovery")]
     pub mtu_discovery: bool,
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[serde(default)]
+    pub fwmark: Option<u32>,
 }
 
 /// Jls upstream configuration
@@ -312,6 +316,8 @@ impl Default for ShadowQuicServerCfg {
             server_name: None,
             gso: default_gso(),
             mtu_discovery: default_mtu_discovery(),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            fwmark: None,
         }
     }
 }
@@ -336,6 +342,8 @@ impl Default for ShadowQuicClientCfg {
             rebind_interval: None,
             min_rebind_interval: None,
             max_rebind_interval: None,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            fwmark: None,
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
         }
@@ -443,6 +451,9 @@ pub struct ShadowQuicClientCfg {
     pub min_rebind_interval: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_duration_ms")]
     pub max_rebind_interval: Option<u32>,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[serde(default)]
+    pub fwmark: Option<u32>,
 
     /// Android Only. the unix socket path for protecting android socket
     #[cfg(target_os = "android")]
