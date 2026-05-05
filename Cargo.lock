@@ -2202,9 +2202,9 @@ dependencies = [
  "async-trait",
  "bytes",
  "fast-socks5",
- "quinn",
+ "quinn 0.11.7 (git+https://github.com/spongebob888/quinn-jls?branch=jls-dev)",
  "rcgen",
- "rustls 0.23.36",
+ "rustls 0.23.36 (git+https://github.com/spongebob888/rustls-jls?branch=jls-dev)",
  "shadowquic",
  "thiserror 2.0.18",
  "tokio",
@@ -2494,13 +2494,31 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.7"
+dependencies = [
+ "bytes",
+ "cfg_aliases",
+ "pin-project-lite",
+ "quinn-proto 0.11.10",
+ "quinn-udp 0.5.10",
+ "rustc-hash",
+ "rustls 0.23.36",
+ "socket2 0.5.10",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "quinn"
+version = "0.11.7"
 source = "git+https://github.com/spongebob888/quinn-jls?branch=jls-dev#670e73bdb0a4a5d8d49c76f643154ce412bc7dcf"
 dependencies = [
  "bytes",
  "cfg_aliases",
  "pin-project-lite",
- "quinn-proto",
- "quinn-udp",
+ "quinn-proto 0.11.10 (git+https://github.com/spongebob888/quinn-jls?branch=jls-dev)",
+ "quinn-udp 0.5.10 (git+https://github.com/spongebob888/quinn-jls?branch=jls-dev)",
  "rustc-hash",
  "rustls 0.23.25",
  "socket2 0.5.10",
@@ -2511,21 +2529,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "quinn-jls"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dc165a7c8d16491e7f9eb1867c1a0c0b60ce174b26d3323259a7b05c5406069"
+name = "quinn-proto"
+version = "0.11.10"
 dependencies = [
  "bytes",
- "cfg_aliases",
- "pin-project-lite",
- "quinn-proto-jls",
- "quinn-udp-jls",
+ "getrandom 0.3.4",
+ "rand",
+ "ring",
  "rustc-hash",
- "rustls-jls",
- "socket2 0.6.3",
+ "rustls 0.23.36",
+ "rustls-pki-types",
+ "slab",
  "thiserror 2.0.18",
- "tokio",
+ "tinyvec",
  "tracing",
  "web-time",
 ]
@@ -2550,24 +2566,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "quinn-proto-jls"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e3f04d716273d25e4923541e625e0084256f72cad7e2e7e50a0e0926aa739f"
+name = "quinn-udp"
+version = "0.5.10"
 dependencies = [
- "bytes",
- "getrandom 0.3.4",
- "lru-slab",
- "rand",
- "ring",
- "rustc-hash",
- "rustls-jls",
- "rustls-pki-types",
- "slab",
- "thiserror 2.0.18",
- "tinyvec",
+ "cfg_aliases",
+ "libc",
+ "once_cell",
+ "socket2 0.5.10",
  "tracing",
- "web-time",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2581,20 +2588,6 @@ dependencies = [
  "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "quinn-udp-jls"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3823b6796bcb9b4224cb0efe7ebd97d4a7fc3c8a5d7e3662c3df8ebadb59a102"
-dependencies = [
- "cfg_aliases",
- "libc",
- "once_cell",
- "socket2 0.6.3",
- "tracing",
- "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2808,6 +2801,20 @@ dependencies = [
 [[package]]
 name = "rustls"
 version = "0.23.36"
+dependencies = [
+ "aes-gcm",
+ "log",
+ "once_cell",
+ "ring",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "rustls"
+version = "0.23.36"
 source = "git+https://github.com/spongebob888/rustls-jls?branch=jls-dev#459f14c849f4fd5986aeeb80a7f52dca785bf80c"
 dependencies = [
  "aes-gcm",
@@ -2825,21 +2832,6 @@ version = "0.23.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
 dependencies = [
- "once_cell",
- "ring",
- "rustls-pki-types",
- "rustls-webpki",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "rustls-jls"
-version = "1.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68483c81131e4f08f8d565632f8b9fec9f71e86f422648175ba03bbd84ea8228"
-dependencies = [
- "aes-gcm",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3119,14 +3111,14 @@ dependencies = [
  "notify",
  "qbase",
  "qevent",
- "quinn-jls",
- "quinn-proto-jls",
+ "quinn 0.11.7",
+ "quinn-proto 0.11.10",
  "qunreliable",
  "rand",
  "rcgen",
  "ring",
+ "rustls 0.23.36",
  "rustls 0.23.37",
- "rustls-jls",
  "rustls-native-certs",
  "sendfd",
  "serde",

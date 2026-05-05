@@ -45,6 +45,7 @@ async fn main() {
 fn setup_log(level: LogLevel) {
     let filter = tracing_subscriber::filter::Targets::new()
         // Enable the `INFO` level for anything in `my_crate`
+        .with_default(level.as_tracing_level())
         .with_target("shadowquic", level.as_tracing_level())
         .with_target(
             "quinn",
