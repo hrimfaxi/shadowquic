@@ -38,13 +38,17 @@ pub async fn handle_request<C: QuicConnection>(
                 let copy_result = tokio::io::copy_bidirectional(
                     &mut Unsplit { s: send, r: recv },
                     &mut tcp_session.stream,
-                ).await;
+                )
+                .await;
                 let duration = start.elapsed();
 
                 match copy_result {
                     Ok((downloaded, uploaded)) => {
                         let throughput_mibps = if duration.as_secs_f64() > 0.0 {
-                            (downloaded + uploaded) as f64 / 1024.0 / 1024.0 / duration.as_secs_f64()
+                            (downloaded + uploaded) as f64
+                                / 1024.0
+                                / 1024.0
+                                / duration.as_secs_f64()
                         } else {
                             0.0
                         };

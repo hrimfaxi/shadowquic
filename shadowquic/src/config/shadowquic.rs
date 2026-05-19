@@ -351,6 +351,7 @@ impl Default for ShadowQuicClientCfg {
             fwmark: None,
             #[cfg(target_os = "android")]
             protect_path: Default::default(),
+            stats: StatsConfig::default(),
         }
     }
 }
@@ -378,6 +379,14 @@ impl Default for BrutalParams {
             ack_compensate: default_brutal_ack_compensate(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct StatsConfig {
+    pub socket_path: Option<std::path::PathBuf>,
+    /// 对应 xtp-rs 的 upstream 标识，如 "127.0.0.1:20808"
+    pub upstream_id: Option<String>,
 }
 
 /// Shadowquic outbound configuration
@@ -465,6 +474,10 @@ pub struct ShadowQuicClientCfg {
     #[cfg(target_os = "android")]
     #[serde(default)]
     pub protect_path: Option<std::path::PathBuf>,
+
+    /// Stats push to xtp-rs Unix DGRAM socket.
+    #[serde(default)]
+    pub stats: StatsConfig,
 }
 
 impl HasCipherSuitePreference for ShadowQuicClientCfg {

@@ -14,6 +14,7 @@ use crate::{
     squic::outbound::handle_request,
 };
 
+use crate::quic::QuicConnection;
 use crate::squic::{IDStore, SQConn, handle_udp_packet_recv};
 
 pub type ShadowQuicConn = SQConn<<EndClient as QuicClient>::C>;
