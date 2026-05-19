@@ -34,16 +34,32 @@ pub async fn handle_request<C: QuicConnection>(
                 req.encode(&mut send).await?;
                 trace!("tcp connect req header sent");
 
-                let u = tokio::io::copy_bidirectional(
+                let start = std::time::Instant::now();
+                let copy_result = tokio::io::copy_bidirectional(
                     &mut Unsplit { s: send, r: recv },
                     &mut tcp_session.stream,
-                )
-                .await?;
+                ).await;
+                let duration = start.elapsed();
 
-                info!(
-                    "request:{} finished, upload:{}bytes,download:{}bytes",
-                    tcp_session.dst, u.1, u.0
-                );
+                match copy_result {
+                    Ok((downloaded, uploaded)) => {
+                        let throughput_mibps = if duration.as_secs_f64() > 0.0 {
+                            (downloaded + uploaded) as f64 / 1024.0 / 1024.0 / duration.as_secs_f64()
+                        } else {
+                            0.0
+                        };
+                        info!(
+                            "request:{} finished, upload:{}bytes, download:{}bytes, dur:{:?}, throughput:{:.2}MiB/s",
+                            tcp_session.dst, uploaded, downloaded, duration, throughput_mibps
+                        );
+                    }
+                    Err(e) => {
+                        info!(
+                            "request:{} interrupted, dur:{:?}, err:{}",
+                            tcp_session.dst, duration, e
+                        );
+                    }
+                }
             }
 
             crate::ProxyRequest::Udp(udp_session) => {
