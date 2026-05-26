@@ -39,6 +39,7 @@ use crate::{
         MAX_DATAGRAM_WINDOW, MAX_SEND_WINDOW, MAX_STREAM_WINDOW, QuicClient, QuicConnection,
         QuicErrorRepr, QuicServer,
     },
+    squic::outbound::StatsReporter,
     sunnyquic::dynamic_cert::DynamicCertResolver,
     utils::socket_opt::SocketFactory,
 };
@@ -146,6 +147,10 @@ impl QuicConnection for Connection {
     }
     fn close(&self, error_code: u64, reason: &[u8]) {
         self.close(VarInt::from_u64(error_code).unwrap(), reason);
+    }
+
+    fn reporter(&self) -> &StatsReporter {
+        unimplemented!()
     }
 }
 

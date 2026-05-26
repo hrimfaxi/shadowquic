@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use std::os::unix::net::UnixDatagram;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
@@ -14,6 +15,7 @@ use crate::msgs::squic::{
 };
 use crate::{
     ProxyRequest,
+    config::StatsConfig,
     error::SError,
     msgs::{SDecode, SEncode, socks5::SocksAddr, squic::SQReq},
     quic::QuicConnection,
@@ -200,6 +202,74 @@ async fn send_user_extension<C: QuicConnection, R: SDecode>(
     Ok(response)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum LinkType {
+    Uplink,
+    Downlink,
+}
+
+impl LinkType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            LinkType::Uplink => "uplink",
+            LinkType::Downlink => "downlink",
+        }
+    }
+}
+
+pub struct StatsReporter {
+    sock: Option<Arc<UnixDatagram>>,
+    path: Option<std::path::PathBuf>,
+    upstream_id: String,
+    peer: String,
+}
+
+impl Clone for StatsReporter {
+    fn clone(&self) -> Self {
+        Self {
+            sock: self.sock.clone(),
+            path: self.path.clone(),
+            upstream_id: self.upstream_id.clone(),
+            peer: self.peer.clone(),
+        }
+    }
+}
+
+impl StatsReporter {
+    pub fn new(cfg: Option<&StatsConfig>, peer: String) -> Self {
+        let (path, upstream_id) = match cfg {
+            Some(c) => (c.socket_path.clone(), c.upstream_id.clone()),
+            None => (None, None),
+        };
+        let sock = path
+            .as_ref()
+            .and_then(|_| UnixDatagram::unbound().ok().map(Arc::new));
+        Self {
+            sock,
+            path,
+            upstream_id: upstream_id.unwrap_or_else(|| peer.clone()),
+            peer,
+        }
+    }
+
+    pub fn report(&self, rtt_ms: f64, loss_rate: f64, mtu: u16, link: LinkType) {
+        let (Some(sock), Some(path)) = (&self.sock, &self.path) else {
+            return;
+        };
+        let payload = format!(
+            r#"{{"upstream_id":"{}","peer":"{}","rtt_ms":{:.3},"loss_rate":{:.4},"mtu":{},"link":"{}"}}
+"#,
+            self.upstream_id,
+            self.peer,
+            rtt_ms,
+            loss_rate,
+            mtu,
+            link.as_str()
+        );
+        let _ = sock.send_to(payload.as_bytes(), path);
+    }
+}
+
 async fn print_stats<C: QuicConnection>(sq_conn: &SQConn<C>) -> SResult<()> {
     static LAST_PRINT: std::sync::LazyLock<tokio::sync::Mutex<Option<std::time::Instant>>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
@@ -215,26 +285,37 @@ async fn print_stats<C: QuicConnection>(sq_conn: &SQConn<C>) -> SResult<()> {
     }
 
     let stats = sq_conn.get_conn_stats().ok_or(SError::ProtocolUnimpl)?;
+    let reporter = sq_conn.conn.reporter();
+
+    let uplink_loss = stats.lost_packets as f64 / (stats.sent_packets + 1) as f64;
+    reporter.report(stats.rtt, uplink_loss, stats.current_mtu, LinkType::Uplink);
     info!(
-        packet_loss_rate=%format!("{:.2}%", stats.lost_packets as f32 / (stats.sent_packets + 1) as f32 * 100.0),
+        packet_loss_rate = %format!("{:.2}%", uplink_loss * 100.0),
         rtt = %format!("{:.1}ms", stats.rtt),
         mtu = stats.current_mtu,
         "uplink stats",
     );
-    let stats = tokio::time::timeout(Duration::from_secs(10), get_peer_conn_stats(sq_conn)).await;
-    let stats = match stats {
-        Ok(Ok(Ok(s))) => s,
-        _ => {
-            trace!("failed to get peer conn stats. Api may not be implemented");
-            return Err(SError::ProtocolUnimpl);
-        }
-    };
-    info!(
-        packet_loss_rate=%format!("{:.2}%", stats.lost_packets as f32 / (stats.sent_packets + 1) as f32 * 100.0),
-        rtt = %format!("{:.1}ms", stats.rtt),
-        mtu = stats.current_mtu,
-        "downlink stats",
-    );
+
+    if let Ok(Ok(Ok(peer_stats))) =
+        tokio::time::timeout(Duration::from_secs(10), get_peer_conn_stats(sq_conn)).await
+    {
+        let downlink_loss = peer_stats.lost_packets as f64 / (peer_stats.sent_packets + 1) as f64;
+        reporter.report(
+            peer_stats.rtt,
+            downlink_loss,
+            peer_stats.current_mtu,
+            LinkType::Downlink,
+        );
+        info!(
+            packet_loss_rate = %format!("{:.2}%", downlink_loss * 100.0),
+            rtt = %format!("{:.1}ms", peer_stats.rtt),
+            mtu = peer_stats.current_mtu,
+            "downlink stats",
+        );
+    } else {
+        trace!("failed to get peer conn stats. Api may not be implemented");
+        return Err(SError::ProtocolUnimpl);
+    }
     Ok(())
 }
 

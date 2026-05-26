@@ -10,7 +10,7 @@ use crate::{
     config::{AuthUser, ShadowQuicClientCfg},
     error::SError,
     msgs::squic::{SQExtError, UserStats},
-    quic::QuicClient,
+    quic::{QuicClient, QuicConnection},
     squic::{inbound::UserManager, outbound},
     utils::socket_opt::{SocketFactory, UdpSocketFactory},
 };

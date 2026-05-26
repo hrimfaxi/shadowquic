@@ -10,6 +10,7 @@ use std::{
 };
 
 use super::brutal::BrutalConfig;
+use crate::squic::outbound::StatsReporter;
 use async_trait::async_trait;
 use bytes::Bytes;
 use quinn::rustls::{
@@ -36,7 +37,7 @@ use quinn::rustls::crypto::ring as crypto_provider;
 use crate::{
     config::{
         CipherSuitePreference, CongestionControl, ShadowQuicClientCfg, ShadowQuicServerCfg,
-        maybe_warn_cipher_suite_on_weak_arch, normalize_cipher_suite_preference,
+        StatsConfig, maybe_warn_cipher_suite_on_weak_arch, normalize_cipher_suite_preference,
     },
     error::SResult,
     msgs::squic::ConnStats,
@@ -47,19 +48,25 @@ use crate::{
     utils::socket_opt::{SocketFactory, UdpSocketFactory},
 };
 
-pub type Connection = quinn::Connection;
-
 #[derive(Clone)]
-pub struct EndServer {
-    inner: quinn::Endpoint,
-    crypto: Arc<ArcSwap<RustlsServerConfig>>, // Include zero-rtt session ticket
-    zero_rtt: Arc<AtomicBool>,
+pub struct Connection {
+    inner: quinn::Connection,
+    reporter: StatsReporter,
 }
 
 #[derive(Clone)]
 pub struct EndClient {
     inner: quinn::Endpoint,
     zero_rtt: bool,
+    stats_config: Option<StatsConfig>,
+}
+
+#[derive(Clone)]
+pub struct EndServer {
+    inner: quinn::Endpoint,
+    crypto: Arc<ArcSwap<RustlsServerConfig>>, // 支持动态更新配置
+    zero_rtt: Arc<AtomicBool>,
+    stats_config: Option<StatsConfig>, // 用于统计上报
 }
 
 impl Deref for EndServer {
@@ -74,92 +81,104 @@ impl Deref for EndServer {
 impl QuicConnection for Connection {
     type RecvStream = quinn::RecvStream;
     type SendStream = quinn::SendStream;
-    async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
-        let (send, recv) = self.open_bi().await?;
 
+    async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
+        let (send, recv) = self.inner.open_bi().await?;
         let id = send.id().index();
         Ok((send, recv, id))
     }
 
     async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
-        let (send, recv) = self.accept_bi().await?;
+        let (send, recv) = self.inner.accept_bi().await?;
 
-        let rate: f32 =
-            (self.stats().path.lost_packets as f32) / ((self.stats().path.sent_packets + 1) as f32);
-
+        let rate: f32 = (self.inner.stats().path.lost_packets as f32)
+            / ((self.inner.stats().path.sent_packets + 1) as f32);
         info!(
-            packet_loss_rate=%format!("{:.2}%", rate*100.0),
-            rtt = %format!("{:.1}ms", self.rtt().as_secs_f32()*1000.0),
-            mtu = self.stats().path.current_mtu,
-            "uplink stats",
+            "packet_loss_rate:{:.2}%, rtt:{:?}, mtu:{}",
+            rate * 100.0,
+            self.inner.rtt(),
+            self.inner.stats().path.current_mtu,
         );
         let id = send.id().index();
         Ok((send, recv, id))
     }
 
     async fn open_uni(&self) -> Result<(Self::SendStream, u64), QuicErrorRepr> {
-        let send = self.open_uni().await?;
+        let send = self.inner.open_uni().await?;
         let id = send.id().index();
         Ok((send, id))
     }
 
     async fn accept_uni(&self) -> Result<(Self::RecvStream, u64), QuicErrorRepr> {
-        let recv = self.accept_uni().await?;
+        let recv = self.inner.accept_uni().await?;
         let id = recv.id().index();
         Ok((recv, id))
     }
 
     async fn read_datagram(&self) -> Result<Bytes, QuicErrorRepr> {
-        let bytes = self.read_datagram().await?;
+        let bytes = self.inner.read_datagram().await?;
         Ok(bytes)
     }
 
     async fn send_datagram(&self, bytes: Bytes) -> Result<(), QuicErrorRepr> {
         let len = bytes.len();
-        match self.send_datagram(bytes) {
-            Ok(_) => (),
-            Err(SendDatagramError::TooLarge) => warn!(
-                "datagram too large:{}>{}",
-                len,
-                self.max_datagram_size().unwrap()
-            ),
-            e => e?,
+        match self.inner.send_datagram(bytes) {
+            Ok(_) => Ok(()),
+            Err(SendDatagramError::TooLarge) => {
+                warn!(
+                    "datagram too large:{}>{}",
+                    len,
+                    self.inner.max_datagram_size().unwrap_or(0)
+                );
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
         }
-        Ok(())
     }
 
     fn close_reason(&self) -> Option<QuicErrorRepr> {
-        self.close_reason().map(|x| x.into())
+        self.inner.close_reason().map(|x| x.into())
     }
+
     fn remote_address(&self) -> SocketAddr {
-        self.remote_address()
+        self.inner.remote_address()
     }
+
     fn peer_id(&self) -> u64 {
-        self.stable_id() as u64
+        self.inner.stable_id() as u64
     }
+
     fn close(&self, error_code: u64, reason: &[u8]) {
-        self.close(VarInt::from_u64(error_code).unwrap(), reason);
+        self.inner
+            .close(VarInt::from_u64(error_code).unwrap(), reason);
     }
+
     fn get_conn_stats(&self) -> Option<ConnStats> {
-        let stats = self.stats();
+        let stats = self.inner.stats();
         Some(ConnStats {
             lost_packets: stats.path.lost_packets,
             sent_packets: stats.path.sent_packets,
-            rtt: self.rtt().as_secs_f64() * 1000.0,
+            rtt: self.inner.rtt().as_secs_f64() * 1000.0,
             current_mtu: stats.path.current_mtu,
         })
+    }
+
+    fn reporter(&self) -> &StatsReporter {
+        &self.reporter
     }
 }
 
 impl AuthedConn for Connection {
     fn authed_user(&self) -> Option<String> {
-        self.jls_chosen_user()
+        self.inner.jls_chosen_user()
     }
 }
 
 #[async_trait]
 impl QuicClient for EndClient {
     type SC = ShadowQuicClientCfg;
+    type C = Connection;
+
     async fn new(cfg: &Self::SC) -> SResult<Self> {
         Self::new_with_socket_factory(
             cfg,
@@ -173,6 +192,7 @@ impl QuicClient for EndClient {
         )
         .await
     }
+
     async fn connect(&self, addr: SocketAddr, server_name: &str) -> Result<Self::C, QuicErrorRepr> {
         let conn = self.inner.connect(addr, server_name)?;
         let conn = if self.zero_rtt {
@@ -205,7 +225,13 @@ impl QuicClient for EndClient {
             conn.close(0u8.into(), b"");
             return Err(QuicErrorRepr::JlsAuthFailed);
         }
-        Ok(conn)
+
+        let peer = conn.remote_address().to_string();
+        let reporter = StatsReporter::new(self.stats_config.as_ref(), peer);
+        Ok(Connection {
+            inner: conn,
+            reporter,
+        })
     }
 
     async fn new_with_socket_factory(
@@ -224,10 +250,9 @@ impl QuicClient for EndClient {
         Ok(EndClient {
             inner: end,
             zero_rtt: cfg.zero_rtt,
+            stats_config: Some(cfg.stats.clone()),
         })
     }
-
-    type C = Connection;
 }
 
 fn to_quinn_cipher_suite(suite: &CipherSuitePreference) -> quinn::rustls::SupportedCipherSuite {
@@ -328,30 +353,17 @@ pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
         }
     };
     let mut config = ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(crypto).expect("rustls config can't created"),
+        QuicClientConfig::try_from(crypto).expect("rustls config can't be created"),
     ));
-
     config.transport_config(Arc::new(tp_cfg));
     config
-}
-
-fn bind_server_udp_socket(bind_addr: SocketAddr) -> io::Result<UdpSocket> {
-    if bind_addr.is_ipv6() && bind_addr.ip().is_unspecified() {
-        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-        let _ = socket
-            .set_only_v6(false)
-            .map_err(|e| warn!("failed to enable dual-stack UDP socket: {}", e));
-        socket.bind(&bind_addr.into())?;
-        Ok(socket.into())
-    } else {
-        UdpSocket::bind(bind_addr)
-    }
 }
 
 #[async_trait]
 impl QuicServer for EndServer {
     type C = Connection;
     type SC = ShadowQuicServerCfg;
+
     async fn new(cfg: &Self::SC) -> SResult<Self> {
         let mut crypto: RustlsServerConfig;
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -361,23 +373,18 @@ impl QuicServer for EndServer {
             RustlsServerConfig::builder_with_protocol_versions(&[&quinn::rustls::version::TLS13])
                 .with_no_client_auth()
                 .with_single_cert(vec![cert_der], PrivateKeyDer::Pkcs8(priv_key))
-                .expect("invalid cert or key when create shadowquic server");
+                .expect("invalid cert or key when creating shadowquic server");
 
         let config = gen_server_config(cfg, &mut crypto);
-        let socket = bind_server_udp_socket(cfg.bind_addr)?;
-        socket.set_nonblocking(true)?;
-        let endpoint = quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
-            Some(config.clone()),
-            socket,
-            quinn::default_runtime().expect("no runtime found for quinn"),
-        )?;
+        let endpoint = quinn::Endpoint::server(config.clone(), cfg.bind_addr)?;
         Ok(EndServer {
             crypto: Arc::new(ArcSwap::new(crypto.into())),
             inner: endpoint,
             zero_rtt: Arc::new(AtomicBool::new(cfg.zero_rtt)),
+            stats_config: None, // 服务端暂不支持动态 StatsConfig，可后续扩展
         })
     }
+
     async fn update_config(&self, cfg: &Self::SC) -> SResult<()> {
         let mut crypto: RustlsServerConfig = (**self.crypto.load()).clone();
         let config = gen_server_config(cfg, &mut crypto);
@@ -386,6 +393,7 @@ impl QuicServer for EndServer {
         self.crypto.store(crypto.into());
         Ok(())
     }
+
     async fn accept(&self) -> Result<Self::C, QuicErrorRepr> {
         match self.deref().accept().await {
             Some(conn) => {
@@ -413,7 +421,12 @@ impl QuicServer for EndServer {
                     connection.close(0u8.into(), b"");
                     return Err(QuicErrorRepr::JlsAuthFailed);
                 }
-                Ok(connection)
+                let peer = connection.remote_address().to_string();
+                let reporter = StatsReporter::new(self.stats_config.as_ref(), peer);
+                Ok(Connection {
+                    inner: connection,
+                    reporter,
+                })
             }
             None => {
                 panic!("Quic endpoint closed");
@@ -502,7 +515,7 @@ fn gen_server_config(
         }
     };
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(
-        QuicServerConfig::try_from(crypto.clone()).expect("rustls config can't created"),
+        QuicServerConfig::try_from(crypto.clone()).expect("rustls config can't be created"),
     ));
     tp_cfg.send_window(MAX_SEND_WINDOW);
     tp_cfg.stream_receive_window(MAX_STREAM_WINDOW.try_into().unwrap());

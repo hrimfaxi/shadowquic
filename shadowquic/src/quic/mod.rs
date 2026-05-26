@@ -6,6 +6,8 @@ use bytes::Bytes;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::squic::outbound::StatsReporter;
+
 // 4 times larger than quinn default value
 // Better decrease the size for portable device
 pub const MAX_WINDOW_BASE: u64 = 4 * 12_500_000 * 100 / 1000; // 100ms RTT
@@ -61,6 +63,8 @@ pub trait QuicConnection: Send + Sync + Clone + 'static {
     fn get_conn_stats(&self) -> Option<ConnStats> {
         None
     }
+    /// 返回统计上报器，用于上报链路质量数据
+    fn reporter(&self) -> &StatsReporter;
 }
 
 impl<T: QuicConnection> Stoppable for T {
