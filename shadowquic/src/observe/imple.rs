@@ -1,11 +1,13 @@
+#[cfg(not(target_has_atomic = "64"))]
+use portable_atomic::{AtomicU64, Ordering};
+#[cfg(target_has_atomic = "64")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use std::{
     collections::HashMap,
     io::{self, IoSlice},
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     task::{Context, Poll},
 };
 
