@@ -1,9 +1,9 @@
-#[cfg(all(feature = "statistics", target_has_atomic = "64"))]
+#[cfg(feature = "statistics")]
 mod imple;
-#[cfg(not(all(feature = "statistics", target_has_atomic = "64")))]
+#[cfg(not(feature = "statistics"))]
 mod unimpl;
 
-#[cfg(all(feature = "statistics", target_has_atomic = "64"))]
+#[cfg(feature = "statistics")]
 pub use self::imple::*;
-#[cfg(not(all(feature = "statistics", target_has_atomic = "64")))]
+#[cfg(not(feature = "statistics"))]
 pub use self::unimpl::*;

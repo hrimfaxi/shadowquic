@@ -2043,6 +2043,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-atomic"
+version = "1.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d20d5497ef88037a52ff98267d066e7f11fcc5e99bbfbd58a42336193aacec3"
+
+[[package]]
 name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2908,6 +2914,7 @@ dependencies = [
  "noq",
  "noq-proto",
  "notify",
+ "portable-atomic",
  "qbase 0.5.1",
  "qevent 0.5.1",
  "quinn-jls",
