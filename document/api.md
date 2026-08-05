@@ -102,8 +102,8 @@ udp_recv: 777
 `tcp_recv` and `udp_recv` count bytes received by the server from the client.
 
 Traffic statistics require the `statistics` feature, which is enabled by
-default on targets with 64-bit atomics. On targets without 64-bit atomics, such
-as 32-bit MIPS, statistics are disabled and this command returns zero counters.
+default. On targets without native 64-bit atomics, such as 32-bit MIPS,
+counters are emulated with `portable-atomic` and remain functional.
 
 To fetch stats for every configured user, omit the username:
 

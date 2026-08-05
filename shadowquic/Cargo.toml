@@ -10,7 +10,7 @@ license = { workspace = true}
 readme = { workspace = true}
 [features]
 default = ["shadowquic-quinn", "sunnyquic-noq", "ring", "statistics", "tproxy", "mixed"]
-statistics = []
+statistics = ["dep:portable-atomic"]
 mixed = ["dep:base64"]
 ring = [
     "dep:ring",
@@ -93,6 +93,10 @@ etherparse = { version = "0.14.3", optional = true }
 [target.'cfg(target_os="linux")'.dependencies]
 libc = { version = "0.2", optional = true }
 etherparse = { version = "0.14.3", optional = true }
+
+# 64-bit atomics via ll/sc CAS loop on targets without native AtomicU64 (e.g. 32-bit MIPS)
+[target.'cfg(not(target_has_atomic = "64"))'.dependencies]
+portable-atomic = { version = "1", optional = true }
 [target.'cfg(target_os="android")'.dependencies]
 sendfd = { version = "0.4.4", features = ["tokio"] }
 
