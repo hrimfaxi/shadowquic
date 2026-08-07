@@ -52,6 +52,13 @@ impl ProxyStatsAtm {
             self.udp_conns.clone(),
         )
     }
+
+    fn reset(&self) {
+        self.tcp_sent.store(0, Ordering::Relaxed);
+        self.tcp_recv.store(0, Ordering::Relaxed);
+        self.udp_sent.store(0, Ordering::Relaxed);
+        self.udp_recv.store(0, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Default)]
@@ -132,6 +139,21 @@ impl Observer {
             UserStats {
                 username: username.to_owned(),
                 ..Default::default()
+            }
+        }
+    }
+
+    pub async fn clear_user_stats(&self, username: &str) {
+        if let Some(stats) = self.user_stats.lock().await.get(username) {
+            stats.reset();
+        }
+    }
+
+    pub async fn clear_all_stats(&self, usernames: &[String]) {
+        let user_stats = self.user_stats.lock().await;
+        for username in usernames {
+            if let Some(stats) = user_stats.get(username) {
+                stats.reset();
             }
         }
     }

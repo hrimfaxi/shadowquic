@@ -24,6 +24,7 @@ use tokio::{
 const SERVER_ADDR: &str = "127.0.0.1:4458";
 const STATS_SERVER_ADDR: &str = "127.0.0.1:4468";
 const TRAFFIC_STATS_SERVER_ADDR: &str = "127.0.0.1:4478";
+const CLEAR_STATS_SERVER_ADDR: &str = "127.0.0.1:4488";
 const TCP_STATS_BYTES: usize = 4096;
 const UDP_STATS_BYTES: usize = 777;
 
@@ -291,6 +292,173 @@ async fn shadowquic_user_api_get_stats_tracks_tcp_and_udp_bytes() {
     })
     .await
     .expect("traffic stats should be updated");
+}
+
+#[tokio::test]
+async fn shadowquic_user_api_clear_stats() {
+    let tcp_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("tcp echo listener should bind");
+    let tcp_addr = tcp_listener.local_addr().unwrap();
+    let udp_socket = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("udp echo socket should bind");
+    let udp_addr = udp_socket.local_addr().unwrap();
+
+    tokio::spawn(tcp_echo_once(tcp_listener, TCP_STATS_BYTES));
+    tokio::spawn(udp_echo_once(udp_socket, UDP_STATS_BYTES));
+
+    let sq_server = ShadowQuicServer::new(ShadowQuicServerCfg {
+        bind_addr: CLEAR_STATS_SERVER_ADDR.parse().unwrap(),
+        users: vec![
+            AuthUser {
+                username: "admin".into(),
+                password: "admin-pass".into(),
+            },
+            AuthUser {
+                username: "bob".into(),
+                password: "bob-pass".into(),
+            },
+        ],
+        jls_upstream: JlsUpstream {
+            addr: "localhost:443".into(),
+            ..Default::default()
+        },
+        alpn: vec!["h3".into()],
+        zero_rtt: false,
+        gso: false,
+        initial_mtu: default_initial_mtu(),
+        congestion_control: CongestionControl::Bbr,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let server = Manager {
+        inbound: Box::new(sq_server),
+        outbound: Box::<DirectOut>::default(),
+    };
+    tokio::spawn(server.run());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let admin = client_at(CLEAR_STATS_SERVER_ADDR, "admin", "admin-pass");
+    let bob = client_at(CLEAR_STATS_SERVER_ADDR, "bob", "bob-pass");
+    let bob_conn = bob.get_conn().await.expect("bob should connect");
+
+    let tcp_payload = vec![0x5a; TCP_STATS_BYTES];
+    let mut tcp_stream = connect_tcp(&bob_conn, SocksAddr::from(tcp_addr))
+        .await
+        .expect("tcp request should open");
+    tcp_stream.write_all(&tcp_payload).await.unwrap();
+    tcp_stream.flush().await.unwrap();
+    let mut tcp_echo = vec![0; TCP_STATS_BYTES];
+    tcp_stream.read_exact(&mut tcp_echo).await.unwrap();
+    assert_eq!(tcp_echo, tcp_payload);
+
+    let udp_payload = Bytes::from(vec![0xa5; UDP_STATS_BYTES]);
+    let udp_bind: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    let (udp_send, mut udp_recv) = associate_udp(&bob_conn, SocksAddr::from(udp_bind), true)
+        .await
+        .expect("udp association should open");
+    udp_send
+        .send((udp_payload.clone(), SocksAddr::from(udp_addr)))
+        .await
+        .expect("udp payload should send");
+    let (udp_echo, _) = tokio::time::timeout(Duration::from_secs(2), udp_recv.recv())
+        .await
+        .expect("udp echo should arrive before timeout")
+        .expect("udp echo channel should stay open");
+    assert_eq!(udp_echo, udp_payload);
+
+    async fn wait_bob_stats(
+        admin: &ShadowQuicClient,
+        tcp_recv: u64,
+        tcp_sent: u64,
+        udp_recv: u64,
+        udp_sent: u64,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let stats = admin
+                    .get_user_stats("bob")
+                    .await
+                    .expect("admin should get bob stats");
+                if stats.tcp_recv == tcp_recv
+                    && stats.tcp_sent == tcp_sent
+                    && stats.udp_recv == udp_recv
+                    && stats.udp_sent == udp_sent
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("traffic stats should be updated");
+    }
+
+    let bytes = TCP_STATS_BYTES as u64;
+    let udp_bytes = UDP_STATS_BYTES as u64;
+    wait_bob_stats(&admin, bytes, bytes, udp_bytes, udp_bytes).await;
+
+    admin
+        .clear_user_stats("bob")
+        .await
+        .expect("admin should clear bob stats");
+    let stats = admin
+        .get_user_stats("bob")
+        .await
+        .expect("admin should get bob stats after clear");
+    assert_eq!(stats.tcp_recv, 0);
+    assert_eq!(stats.tcp_sent, 0);
+    assert_eq!(stats.udp_recv, 0);
+    assert_eq!(stats.udp_sent, 0);
+    assert_eq!(stats.tcp_conns, 1);
+    assert_eq!(stats.udp_conns, 1);
+    assert_eq!(stats.conn_num, 1);
+
+    let tcp_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("second tcp echo listener should bind");
+    let tcp_addr = tcp_listener.local_addr().unwrap();
+    tokio::spawn(tcp_echo_once(tcp_listener, TCP_STATS_BYTES));
+    let mut tcp_stream = connect_tcp(&bob_conn, SocksAddr::from(tcp_addr))
+        .await
+        .expect("second tcp request should open");
+    tcp_stream.write_all(&tcp_payload).await.unwrap();
+    tcp_stream.flush().await.unwrap();
+    let mut tcp_echo = vec![0; TCP_STATS_BYTES];
+    tcp_stream.read_exact(&mut tcp_echo).await.unwrap();
+    assert_eq!(tcp_echo, tcp_payload);
+    wait_bob_stats(&admin, bytes, bytes, 0, 0).await;
+
+    admin
+        .clear_all_stats()
+        .await
+        .expect("admin should clear all stats");
+    let all_stats = admin
+        .get_all_stats()
+        .await
+        .expect("admin should get all stats after clear");
+    for stats in all_stats {
+        assert_eq!(stats.tcp_recv, 0);
+        assert_eq!(stats.tcp_sent, 0);
+        assert_eq!(stats.udp_recv, 0);
+        assert_eq!(stats.udp_sent, 0);
+    }
+
+    assert_eq!(
+        bob.clear_user_stats("bob").await,
+        Err(SQExtError::PermissionDenied)
+    );
+    assert_eq!(
+        bob.clear_all_stats().await,
+        Err(SQExtError::PermissionDenied)
+    );
+    assert_eq!(
+        admin.clear_user_stats("missing").await,
+        Err(SQExtError::NotFound)
+    );
 }
 
 fn client(username: &str, password: &str) -> ShadowQuicClient {
