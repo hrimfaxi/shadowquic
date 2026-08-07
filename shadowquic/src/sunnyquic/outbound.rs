@@ -167,6 +167,26 @@ impl UserManager for SunnyQuicClient {
             .await
             .map_err(|error| SQExtError::Other(error.to_string()))?
     }
+
+    async fn clear_user_stats(&self, username: &str) -> Result<(), SQExtError> {
+        let conn = self
+            .get_conn()
+            .await
+            .map_err(|error| SQExtError::Other(error.to_string()))?;
+        outbound::clear_user_stats(&conn, username)
+            .await
+            .map_err(|error| SQExtError::Other(error.to_string()))?
+    }
+
+    async fn clear_all_stats(&self) -> Result<(), SQExtError> {
+        let conn = self
+            .get_conn()
+            .await
+            .map_err(|error| SQExtError::Other(error.to_string()))?;
+        outbound::clear_all_stats(&conn)
+            .await
+            .map_err(|error| SQExtError::Other(error.to_string()))?
+    }
 }
 
 #[async_trait]

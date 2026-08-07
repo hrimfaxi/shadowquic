@@ -33,6 +33,10 @@ impl Observer {
         Vec::new()
     }
 
+    pub async fn clear_user_stats(&self, _username: &str) {}
+
+    pub async fn clear_all_stats(&self, _usernames: &[String]) {}
+
     pub(crate) async fn wrap_request(&self, req: ProxyRequest) -> ProxyRequest {
         req
     }

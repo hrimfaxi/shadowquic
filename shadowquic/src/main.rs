@@ -56,6 +56,9 @@ enum ApiCommand {
     /// Kill all online connections for a user
     #[command(name = "kill-conn")]
     KillUserConn { username: String },
+    /// Clear traffic stats for a user, or all users when username is omitted
+    #[command(name = "clear-stats")]
+    ClearUserStats { username: Option<String> },
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
@@ -170,6 +173,24 @@ async fn call_user_manager_api(
                 .await
                 .map_err(|error| format!("kill-conn of user {username} failed: {error:?}"))?;
             println!("user connections killed: {username}");
+            Ok(())
+        }
+        ApiCommand::ClearUserStats {
+            username: Some(username),
+        } => {
+            user_manager
+                .clear_user_stats(&username)
+                .await
+                .map_err(|error| format!("clear-stats of user {username} failed: {error:?}"))?;
+            println!("user stats cleared: {username}");
+            Ok(())
+        }
+        ApiCommand::ClearUserStats { username: None } => {
+            user_manager
+                .clear_all_stats()
+                .await
+                .map_err(|error| format!("clear-stats of all users failed: {error:?}"))?;
+            println!("all user stats cleared");
             Ok(())
         }
     }
