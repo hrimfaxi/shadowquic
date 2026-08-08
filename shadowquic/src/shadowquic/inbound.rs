@@ -114,6 +114,28 @@ impl UserManager for ShadowQuicUserManager {
         self.observer.close_conn(username).await;
         Ok(())
     }
+
+    async fn clear_user_stats(&self, username: &str) -> Result<(), SQExtError> {
+        let config = self.config.read().await;
+        if !config.users.iter().any(|user| user.username == username) {
+            return Err(SQExtError::NotFound);
+        }
+        drop(config);
+        self.observer.clear_user_stats(username).await;
+        Ok(())
+    }
+
+    async fn clear_all_stats(&self) -> Result<(), SQExtError> {
+        let config = self.config.read().await;
+        let usernames = config
+            .users
+            .iter()
+            .map(|user| user.username.clone())
+            .collect::<Vec<_>>();
+        drop(config);
+        self.observer.clear_all_stats(&usernames).await;
+        Ok(())
+    }
 }
 
 impl ShadowQuicServer {

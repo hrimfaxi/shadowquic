@@ -36,6 +36,8 @@ pub trait UserManager: Send + Sync {
     async fn get_user_stats(&self, username: &str) -> Result<UserStats, SQExtError>;
     async fn get_all_stats(&self) -> Result<Vec<UserStats>, SQExtError>;
     async fn kill_user_conns(&self, username: &str) -> Result<(), SQExtError>;
+    async fn clear_user_stats(&self, username: &str) -> Result<(), SQExtError>;
+    async fn clear_all_stats(&self) -> Result<(), SQExtError>;
 }
 
 #[derive(Clone)]
@@ -235,6 +237,18 @@ impl<C: QuicConnection> SQServerConn<C> {
                     .await
                     .encode(send)
                     .await?;
+            }
+            ExtOpcodeUser::ClearUserStats(username) => {
+                info!(username = %username, "clearing user stats");
+                user_manager
+                    .clear_user_stats(&username)
+                    .await
+                    .encode(send)
+                    .await?;
+            }
+            ExtOpcodeUser::ClearAllStats => {
+                info!("clearing all user stats");
+                user_manager.clear_all_stats().await.encode(send).await?;
             }
         }
         Ok(())

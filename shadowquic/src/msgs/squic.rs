@@ -60,6 +60,8 @@ pub enum ExtOpcodeUser {
     GetUserStats(UserName) = 0x3,
     KillUserConn(UserName) = 0x4,
     GetAllStats = 0x5,
+    ClearUserStats(UserName) = 0x6,
+    ClearAllStats = 0x7,
 }
 #[derive(PartialEq)]
 #[repr(u8)]

@@ -134,6 +134,46 @@ udp_sent: 777
 udp_recv: 777
 ```
 
+### `clear-stats [username]`
+
+Zero the cumulative traffic byte counters (`tcp_sent`, `tcp_recv`, `udp_sent`,
+`udp_recv`) for one user, or every configured user when `username` is omitted.
+
+```sh
+shadowquic api clear-stats alice
+```
+
+On success, the command prints:
+
+```text
+user stats cleared: alice
+```
+
+Omitting the username clears every configured user:
+
+```sh
+shadowquic api clear-stats
+```
+
+```text
+all user stats cleared
+```
+
+Only the four byte counters are reset. The live connection counters
+(`conn_num`, `tcp_conns`, `udp_conns`) are not touched. Active connections keep
+counting bytes from zero after the reset.
+
+The reset is best-effort: the four counters are zeroed independently rather than
+as one atomic snapshot, so under active traffic a concurrent `get-stats` may
+briefly observe a mix of zeroed and un-zeroed counters.
+
+Only the admin user (`admin`, `admin_bob`, ...) can run this command; other
+users get `PermissionDenied`. Clearing stats of a user that does not exist fails
+with `NotFound`.
+
+Both the client and the server must run a version that supports `clear-stats`;
+an older server does not recognize the request.
+
 ### `kill-conn <username>`
 
 Close all online QUIC connections for a user.

@@ -442,6 +442,14 @@ The supported `USER OPCODE` values are:
   [`GetAllStats`],
   [Empty],
   [`Result<Vec<UserStats>, SQExtError>`],
+  [`0x6`],
+  [`ClearUserStats`],
+  [`UserName`],
+  [`Result<(), SQExtError>`],
+  [`0x7`],
+  [`ClearAllStats`],
+  [Empty],
+  [`Result<(), SQExtError>`],
 )
 
 `AuthUser` contains two strings:

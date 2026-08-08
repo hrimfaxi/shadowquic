@@ -176,6 +176,19 @@ pub async fn kill_user_conns<C: QuicConnection>(
     send_user_extension(sq_conn, ExtOpcodeUser::KillUserConn(username.to_owned())).await
 }
 
+pub async fn clear_user_stats<C: QuicConnection>(
+    sq_conn: &SQConn<C>,
+    username: &str,
+) -> SResult<Result<(), SQExtError>> {
+    send_user_extension(sq_conn, ExtOpcodeUser::ClearUserStats(username.to_owned())).await
+}
+
+pub async fn clear_all_stats<C: QuicConnection>(
+    sq_conn: &SQConn<C>,
+) -> SResult<Result<(), SQExtError>> {
+    send_user_extension(sq_conn, ExtOpcodeUser::ClearAllStats).await
+}
+
 async fn send_user_extension<C: QuicConnection, R: SDecode>(
     sq_conn: &SQConn<C>,
     opcode: ExtOpcodeUser,
