@@ -16,6 +16,10 @@ pub fn default_rate_limit() -> u64 {
     u64::MAX
 }
 
+pub fn default_stats_log_interval() -> u64 {
+    0
+}
+
 /// Configuration of shadowquic inbound
 ///
 /// Example:
@@ -144,6 +148,7 @@ impl Default for ShadowQuicClientCfg {
             socket_opt: Default::default(),
             protect_path: Default::default(),
             stats: StatsConfig::default(),
+            stats_log_interval: default_stats_log_interval(),
         }
     }
 }
@@ -278,6 +283,11 @@ pub struct ShadowQuicClientCfg {
     /// Stats push to xtp-rs Unix DGRAM socket.
     #[serde(default)]
     pub stats: StatsConfig,
+
+    /// Interval in seconds for periodically logging uplink/downlink link quality.
+    /// 0 (default) keeps the legacy once-per-request logging.
+    #[serde(default = "default_stats_log_interval")]
+    pub stats_log_interval: u64,
 }
 
 impl HasCipherSuitePreference for ShadowQuicClientCfg {

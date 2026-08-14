@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use std::os::unix::net::UnixDatagram;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
@@ -29,16 +30,21 @@ pub async fn handle_request<C: QuicConnection>(
     req: ProxyRequest,
     conn: SQConn<C>,
     over_stream: bool,
+    stats_log_interval: u64,
 ) -> Result<(), SError> {
     let (mut send, recv, id) = QuicConnection::open_bi(&conn.conn).await?;
     let _span = span!(Level::INFO, "bistream", id = id);
-    let conn_clone = conn.clone();
-    tokio::spawn(
-        async move {
-            let _ = print_stats(&conn_clone).await;
-        }
-        .in_current_span(),
-    );
+    // With periodic logging disabled (interval 0), keep the legacy behavior of
+    // printing stats once per new request.
+    if stats_log_interval == 0 {
+        let conn_clone = conn.clone();
+        tokio::spawn(
+            async move {
+                let _ = print_stats_throttled(&conn_clone).await;
+            }
+            .in_current_span(),
+        );
+    }
     let fut = async move {
         match req {
             crate::ProxyRequest::Tcp(mut tcp_session) => {
@@ -270,7 +276,76 @@ impl StatsReporter {
     }
 }
 
-async fn print_stats<C: QuicConnection>(sq_conn: &SQConn<C>) -> SResult<()> {
+/// Only one connection may print link quality logs at a time, to avoid spamming
+/// the log when multiple connections are alive.
+static STATS_LOG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Shortest interval at which the connection-closed state is polled, so the
+/// reporter role is released promptly once the connection closes.
+const CLOSE_POLL: Duration = Duration::from_secs(1);
+
+/// RAII guard that clears the global reporter flag on drop, so the role is
+/// released even if the reporter task is cancelled or panics.
+struct StatsLogActiveGuard;
+
+impl Drop for StatsLogActiveGuard {
+    fn drop(&mut self) {
+        STATS_LOG_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Periodically prints uplink/downlink link quality logs until the connection
+/// closes. The first print happens immediately, then once per `interval`.
+/// Only one connection prints at a time; connections that fail to claim the
+/// role wait for the owner to release it instead of giving up.
+pub async fn report_stats_periodically<C: QuicConnection>(
+    sq_conn: SQConn<C>,
+    interval: Duration,
+) {
+    if interval.is_zero() {
+        return;
+    }
+
+    // Compete to become the sole reporter; if not claimed, wait for the owner
+    // to release it, or exit if this connection closes.
+    loop {
+        if STATS_LOG_ACTIVE
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            break;
+        }
+        if sq_conn.close_reason().is_some() {
+            return;
+        }
+        tokio::time::sleep(CLOSE_POLL).await;
+    }
+    // From here on the flag is guaranteed to be released when this future ends,
+    // whether by normal return, cancellation, or panic.
+    let _active_guard = StatsLogActiveGuard;
+
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if sq_conn.close_reason().is_some() {
+                    break;
+                }
+                let _ = print_stats(&sq_conn).await;
+            }
+            _ = tokio::time::sleep(CLOSE_POLL) => {
+                if sq_conn.close_reason().is_some() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Legacy per-request stats logging used when periodic logging is disabled.
+/// Prints at most once every 10 seconds across all connections.
+async fn print_stats_throttled<C: QuicConnection>(sq_conn: &SQConn<C>) -> SResult<()> {
     static LAST_PRINT: std::sync::LazyLock<tokio::sync::Mutex<Option<std::time::Instant>>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
 
@@ -284,6 +359,10 @@ async fn print_stats<C: QuicConnection>(sq_conn: &SQConn<C>) -> SResult<()> {
         *last_print = Some(std::time::Instant::now());
     }
 
+    print_stats(sq_conn).await
+}
+
+async fn print_stats<C: QuicConnection>(sq_conn: &SQConn<C>) -> SResult<()> {
     let stats = sq_conn.get_conn_stats().ok_or(SError::ProtocolUnimpl)?;
     let reporter = sq_conn.conn.reporter();
 
