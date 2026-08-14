@@ -119,7 +119,16 @@ impl OutboundCfg {
     async fn build_outbound(self) -> Result<Box<dyn Outbound>, SError> {
         let r: Box<dyn Outbound> = match self {
             OutboundCfg::Socks(cfg) => Box::new(SocksClient::new(cfg)),
-            OutboundCfg::ShadowQuic(cfg) => Box::new(ShadowQuicClient::new(cfg)),
+            OutboundCfg::ShadowQuic(cfg) => {
+                if cfg.stats_log_interval != 0 {
+                    warn!(
+                        "stats_log_interval is set: periodic link-quality logging queries \
+                         downlink stats over the QUIC connection every interval, keeping the \
+                         connection alive so it will not idle out"
+                    );
+                }
+                Box::new(ShadowQuicClient::new(cfg))
+            }
             OutboundCfg::SunnyQuic(cfg) => Box::new(SunnyQuicClient::new(cfg)),
             OutboundCfg::Direct(cfg) => Box::new(DirectOut::new(cfg)),
         };
