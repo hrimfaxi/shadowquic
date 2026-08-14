@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::{SocketAddr, UdpSocket},
+    net::SocketAddr,
     ops::Deref,
     sync::{
         Arc,
@@ -21,7 +21,6 @@ use quinn::{
     ClientConfig, MtuDiscoveryConfig, SendDatagramError, TransportConfig, VarInt,
     congestion::{BbrConfig, CubicConfig, NewRenoConfig},
 };
-use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{debug, error, info, trace, warn};
 
 use quinn::rustls::ServerConfig as RustlsServerConfig;
