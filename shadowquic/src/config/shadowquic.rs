@@ -16,6 +16,10 @@ pub fn default_rate_limit() -> u64 {
     u64::MAX
 }
 
+pub fn default_stats_log_interval() -> u64 {
+    0
+}
+
 /// Configuration of shadowquic inbound
 ///
 /// Example:
@@ -160,6 +164,7 @@ impl Default for ShadowQuicClientCfg {
             cipher_suite_preference: None,
             socket_opt: Default::default(),
             protect_path: Default::default(),
+            stats_log_interval: default_stats_log_interval(),
         }
     }
 }
@@ -283,6 +288,11 @@ pub struct ShadowQuicClientCfg {
     /// Socket options like bind interface and fwmark
     #[serde(flatten)]
     pub socket_opt: SocketOpt,
+
+    /// Interval in seconds for periodically logging uplink/downlink link quality.
+    /// 0 (default) keeps the legacy once-per-request logging.
+    #[serde(default = "default_stats_log_interval")]
+    pub stats_log_interval: u64,
 }
 
 impl HasCipherSuitePreference for ShadowQuicClientCfg {

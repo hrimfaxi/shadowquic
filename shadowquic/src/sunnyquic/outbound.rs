@@ -197,7 +197,7 @@ impl Outbound for SunnyQuicClient {
         let conn = self.quic_conn.as_mut().unwrap().clone();
 
         let over_stream = self.config.over_stream;
-        outbound::handle_request(req, conn, over_stream).await?;
+        outbound::handle_request(req, conn, over_stream, 0).await?;
         Ok(())
     }
 }
