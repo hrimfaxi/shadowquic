@@ -129,7 +129,16 @@ impl OutboundCfg {
                 }
                 Box::new(ShadowQuicClient::new(cfg))
             }
-            OutboundCfg::SunnyQuic(cfg) => Box::new(SunnyQuicClient::new(cfg)),
+            OutboundCfg::SunnyQuic(cfg) => {
+                if cfg.stats_log_interval != 0 {
+                    warn!(
+                        "stats_log_interval is set: periodic link-quality logging queries \
+                         downlink stats over the QUIC connection every interval, keeping the \
+                         connection alive so it will not idle out"
+                    );
+                }
+                Box::new(SunnyQuicClient::new(cfg))
+            }
             OutboundCfg::Direct(cfg) => Box::new(DirectOut::new(cfg)),
         };
         Ok(r)

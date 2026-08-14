@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::{net::ToSocketAddrs, sync::Arc};
+use std::{net::ToSocketAddrs, sync::Arc, time::Duration};
 use tokio::sync::{OnceCell, SetOnce};
 
 use super::EndClient;
@@ -88,6 +88,17 @@ impl SunnyQuicClient {
                 .await
                 .map_err(|x| error!("handle udp packet recv error: {}", x));
         });
+        let stats_log_interval = self.config.stats_log_interval;
+        if stats_log_interval > 0 {
+            let conn_clone = conn.clone();
+            tokio::spawn(async move {
+                outbound::report_stats_periodically(
+                    conn_clone,
+                    Duration::from_secs(stats_log_interval),
+                )
+                .await;
+            });
+        }
         Ok(conn)
     }
     async fn prepare_conn(&mut self) -> Result<(), SError> {
@@ -197,7 +208,7 @@ impl Outbound for SunnyQuicClient {
         let conn = self.quic_conn.as_mut().unwrap().clone();
 
         let over_stream = self.config.over_stream;
-        outbound::handle_request(req, conn, over_stream, 0).await?;
+        outbound::handle_request(req, conn, over_stream, self.config.stats_log_interval).await?;
         Ok(())
     }
 }

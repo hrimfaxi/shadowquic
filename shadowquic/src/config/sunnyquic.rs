@@ -6,7 +6,7 @@ use crate::config::{
     AuthUser, BrutalParams, CipherSuitePreference, CongestionControl, HasCipherSuitePreference,
     SocketOpt, default_alpn, default_congestion_control, default_gso, default_initial_mtu,
     default_keep_alive_interval, default_min_mtu, default_mtu_discovery, default_over_stream,
-    default_store_flush_interval, default_zero_rtt,
+    default_stats_log_interval, default_store_flush_interval, default_zero_rtt,
 };
 
 pub(crate) fn default_multipath_num() -> u32 {
@@ -129,6 +129,7 @@ impl Default for SunnyQuicClientCfg {
             over_stream: Default::default(),
             min_mtu: default_min_mtu(),
             keep_alive_interval: default_keep_alive_interval(),
+            stats_log_interval: default_stats_log_interval(),
             max_path_num: default_multipath_num(),
             extra_paths: Default::default(),
             cert_path: Default::default(),
@@ -211,6 +212,10 @@ pub struct SunnyQuicClientCfg {
     /// Disabled by default.
     #[serde(default = "default_keep_alive_interval")]
     pub keep_alive_interval: u32,
+    /// Interval in seconds for periodically logging uplink/downlink link quality.
+    /// 0 (default) keeps the legacy once-per-request logging.
+    #[serde(default = "default_stats_log_interval")]
+    pub stats_log_interval: u64,
     /// Enable QUIC Generic Segmentation Offload (GSO).
     /// Controls [`quinn::TransportConfig::enable_segmentation_offload`]. When supported, GSO reduces
     /// CPU usage for bulk sends; unsupported environments may see transient startup packet loss.
