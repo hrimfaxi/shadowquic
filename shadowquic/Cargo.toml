@@ -39,7 +39,6 @@ sunnyquic-noq = ["dep:noq", "dep:rustls", "dep:rustls-native-certs","dep:notify"
 tproxy = ["dep:etherparse", "dep:libc"]
 
 [dependencies]
-anyhow = "1.0.100"
 thiserror = "2.0.18"
 tokio = {version = "1.52.3", features = ["io-util", "net","rt","macros","rt-multi-thread","signal","time"]}
 tracing = "0.1.44"
@@ -83,7 +82,7 @@ notify = { version = "8.2.0", features = ["serde"], optional = true}
 arc-swap = { version = "1.9.1"}
 
 console-subscriber = { version = "0.5.0", optional = true }
-serde-saphyr = "0.0.26"
+serde-saphyr = "1.1.0"
 aws-lc-rs = { version = "1", optional = true, default-features = false }
 ring = { version = "0.17.14", optional = true }
 base64 = { version = "0.22.1", optional = true }

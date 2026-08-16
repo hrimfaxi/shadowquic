@@ -27,10 +27,7 @@ pub struct DirectOut {
 
 #[async_trait]
 impl Outbound for DirectOut {
-    async fn handle(
-        &mut self,
-        req: crate::ProxyRequest,
-    ) -> anyhow::Result<(), crate::error::SError> {
+    async fn handle(&mut self, req: crate::ProxyRequest) -> Result<(), crate::error::SError> {
         let dns_strategy = self.cfg.dns_strategy.clone();
         let self_clone = self.clone();
 
