@@ -6,7 +6,6 @@ use msgs::socks5::SocksAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
-use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info};

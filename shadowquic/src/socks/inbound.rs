@@ -18,7 +18,6 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UdpSocket};
 
-use anyhow::Result;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tracing::{Instrument, error, info, info_span};
 
