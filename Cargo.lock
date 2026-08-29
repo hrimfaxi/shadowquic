@@ -117,7 +117,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -128,7 +128,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -904,7 +904,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1341,7 +1341,7 @@ dependencies = [
  "hyper",
  "libc",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1784,7 +1784,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash",
  "rustls 0.23.43",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
@@ -1828,7 +1828,7 @@ checksum = "02bba20e097a5a16cd0ad14ec882fae1e80a092a124e9422fc4dddd92e96a647"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -1867,7 +1867,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2314,7 +2314,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.36 (git+https://github.com/spongebob888/rustls-jls?tag=v%2F0.23.36-1.3.1)",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -2323,9 +2323,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-jls"
-version = "0.3.6"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55706c432564de8b518055947eca4aa0f6c9dfb3b8fbfaf77ea37864ae5dc3e0"
+checksum = "06575428b476c2672be58db56c48d517c2b469b3083eeb9f51dc4f61de541be4"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -2334,7 +2334,7 @@ dependencies = [
  "quinn-udp-jls",
  "rustc-hash",
  "rustls-jls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -2363,9 +2363,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto-jls"
-version = "0.3.6"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d5e4adccc6ebfc7bcb5eabf9ba807d658da125b753477fed32b31fbcf08fddf"
+checksum = "cfff8bfe6190cc5e06e722680afbe1ec5cf3c6e8b62d026b1551bb68c63f0fb3"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -2390,22 +2390,22 @@ source = "git+https://github.com/spongebob888/quinn-jls?branch=jls-dev#e1c810816
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
 name = "quinn-udp-jls"
-version = "0.3.6"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "138b3d30aff9d2a670e3465313d547bb4c55de132fa30dea9b7acc5e69587130"
+checksum = "5c5f833e7fb0eefb2f80fb857c0873f60aa3e9dafd0b63c680e7ac14b178091b"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2649,9 +2649,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-jls"
-version = "1.3.3"
+version = "1.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "275a86a76a7acd85b537f249162c056036b77608d9e4a037e2ecc8ccfb2b9dbe"
+checksum = "e7b8b5e6fb5b6c65cc8b198609185aa0668d80df151ee4928cf978413bec0bed"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -2998,7 +2998,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3559,7 +3559,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
