@@ -26,12 +26,12 @@ const FIRST_FORWARD_WINDOW: Duration = Duration::from_millis(500);
 #[tokio::test]
 async fn bad_password_client_does_not_block_valid_client_handshake() {
     let filter = tracing_subscriber::filter::Targets::new()
-    // Enable the `INFO` level for anything in `my_crate`
-    .with_target("concurrent_handshake", Level::TRACE)
-    .with_target("quinn", LevelFilter::WARN)
-    .with_target("quinn_jls", LevelFilter::TRACE)
-    .with_target("quinn_proto_jls", LevelFilter::TRACE)
-    .with_target("shadowquic", LevelFilter::TRACE);
+        // Enable the `INFO` level for anything in `my_crate`
+        .with_target("concurrent_handshake", Level::TRACE)
+        .with_target("quinn", LevelFilter::WARN)
+        .with_target("quinn_jls", LevelFilter::TRACE)
+        .with_target("quinn_proto_jls", LevelFilter::TRACE)
+        .with_target("shadowquic", LevelFilter::TRACE);
 
     // Enable the `DEBUG` level for a specific module.
 
