@@ -1,4 +1,5 @@
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use bytes::Bytes;
 use error::SError;
@@ -8,7 +9,9 @@ use tokio::net::TcpStream;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{error, info};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
+use tracing::{Instrument, Span, error, info, info_span};
 
 pub mod config;
 pub mod direct;
@@ -91,6 +94,12 @@ pub trait Inbound<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend>: Send + Sync + Unp
 
 #[async_trait]
 pub trait Outbound<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend>: Send + Sync + Unpin {
+    /// Handle one accepted proxy request.
+    ///
+    /// Implementations must not drive the whole session inline: spawn the
+    /// per-session work and return promptly, so the caller's accept/shutdown
+    /// loop keeps making progress (shutdown observation, panic propagation,
+    /// bounded draining). All built-in outbounds follow this contract.
     async fn handle(&mut self, req: ProxyRequest<T, I, O>) -> Result<(), SError>;
 }
 
@@ -111,9 +120,20 @@ impl UdpRecv for Receiver<(Bytes, SocksAddr)> {
         Ok(r)
     }
 }
-pub struct Manager {
+/// One proxy instance: traffic accepted by `inbound` is forwarded to `outbound`.
+pub struct Instance {
     pub inbound: Box<dyn Inbound>,
     pub outbound: Box<dyn Outbound>,
+}
+
+impl Instance {
+    pub fn new(inbound: Box<dyn Inbound>, outbound: Box<dyn Outbound>) -> Self {
+        Self { inbound, outbound }
+    }
+}
+
+pub struct Manager {
+    pub instances: Vec<Instance>,
 }
 
 /// Resolves when a shutdown signal is received (Ctrl-C, plus SIGTERM on unix).
@@ -135,31 +155,159 @@ async fn shutdown_signal() {
 }
 
 impl Manager {
+    /// Creates a manager with a single inbound/outbound pair.
+    pub fn new(inbound: Box<dyn Inbound>, outbound: Box<dyn Outbound>) -> Self {
+        Self {
+            instances: vec![Instance::new(inbound, outbound)],
+        }
+    }
+
+    /// Creates a manager running multiple inbound/outbound pairs concurrently.
+    ///
+    /// # Panics
+    /// Panics in debug builds if `instances` is empty; `run` rejects it in
+    /// release builds.
+    pub fn with_instances(instances: Vec<Instance>) -> Self {
+        debug_assert!(
+            !instances.is_empty(),
+            "Manager requires at least one instance"
+        );
+        Self { instances }
+    }
+
+    /// Runs all instances until a shutdown signal (Ctrl-C / SIGTERM).
+    ///
+    /// Instances are **not** fault-isolated: if any instance's task exits
+    /// unexpectedly (or panics), the remaining instances are shut down
+    /// gracefully (flushing their persistent state) and `Err` is returned
+    /// so the caller can exit the process. Run the proxy under a supervisor
+    /// (systemd, procd, ...) that restarts it on failure.
     pub async fn run(self) -> Result<(), SError> {
-        self.inbound.init().await?;
-        let mut inbound = self.inbound;
-        let mut outbound = self.outbound;
-        let shutdown = shutdown_signal();
-        tokio::pin!(shutdown);
-        loop {
-            tokio::select! {
-                _ = &mut shutdown => {
-                    info!("shutdown signal received, persisting users and stats");
-                    inbound.shutdown().await?;
-                    return Ok(());
-                }
-                req = inbound.accept() => match req {
-                    Ok(req) => match outbound.handle(req).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            error!("error during handling request: {}", e)
-                        }
-                    },
-                    Err(e) => {
-                        error!("error during accepting request: {}", e)
+        if self.instances.is_empty() {
+            return Err(SError::Instance("no instances to run".into()));
+        }
+        for (i, inst) in self.instances.iter().enumerate() {
+            if let Err(e) = inst.inbound.init().await {
+                error!(instance = i, "instance init failed: {}", e);
+                // Roll back instances initialized so far (best effort), e.g. to
+                // flush their persistent state, and surface the init error.
+                for (j, prev) in self.instances[..i].iter().enumerate() {
+                    if let Err(e) = prev.inbound.shutdown().await {
+                        error!(instance = j, "error during rollback shutdown: {}", e);
                     }
                 }
+                return Err(SError::Instance(format!("instance {i} init failed: {e}")));
+            }
+        }
+        info!("running {} instance(s)", self.instances.len());
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let multi = self.instances.len() > 1;
+        let mut tasks = JoinSet::new();
+        for (i, mut inst) in self.instances.into_iter().enumerate() {
+            let mut shutdown_rx = shutdown_rx.clone();
+            // The instance index only serves to tell chains apart; skip the
+            // span for the common single-instance case to keep logs terse.
+            let span = if multi {
+                info_span!("instance", n = i)
+            } else {
+                Span::none()
+            };
+            let task = async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            inst.inbound.shutdown().await?;
+                            return Ok(());
+                        }
+                        req = inst.inbound.accept() => match req {
+                            Ok(req) => {
+                                if let Err(e) = inst.outbound.handle(req).await {
+                                    error!("error during handling request: {}", e)
+                                }
+                            }
+                            Err(e) => {
+                                error!("error during accepting request: {}", e)
+                            }
+                        }
+                    }
+                }
+            };
+            tasks.spawn(task.instrument(span));
+        }
+
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
+        tokio::select! {
+            _ = &mut shutdown => {
+                info!("shutdown signal received, persisting users and stats");
+                let _ = shutdown_tx.send(true);
+                drain_instances(&mut tasks).await
+            }
+            Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                // An instance task ended before the shutdown signal: it either
+                // panicked or stopped unexpectedly. Shut the remaining instances
+                // down gracefully (flushing their persistent state) before
+                // surfacing the error so the caller can exit.
+                let err = match res {
+                    Ok(Ok(())) => SError::Instance("an instance stopped unexpectedly".into()),
+                    Ok(Err(e)) => e,
+                    Err(join_err) => SError::Instance(format!("instance task failed: {join_err}")),
+                };
+                error!("instance stopped unexpectedly: {}", err);
+                let _ = shutdown_tx.send(true);
+                let _ = drain_instances(&mut tasks).await;
+                Err(err)
             }
         }
     }
+}
+
+/// Maximum time instances get to shut down gracefully (flush persistent
+/// state) before they are aborted. Bounded so a hung `Inbound::shutdown`
+/// or a custom `Outbound::handle` that blocks on a live session cannot
+/// stall process exit forever.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Waits for all instance tasks to finish and returns the first error
+/// (subsequent errors are logged). The shutdown signal must already be sent.
+///
+/// Graceful draining is bounded by [`DRAIN_TIMEOUT`]; instances still
+/// running when it expires are aborted.
+async fn drain_instances(tasks: &mut JoinSet<Result<(), SError>>) -> Result<(), SError> {
+    let mut result = Ok(());
+    let drain = async {
+        while let Some(res) = tasks.join_next().await {
+            if let Err(e) = match res {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e),
+                Err(join_err) => Err(SError::Instance(format!(
+                    "instance task failed: {join_err}"
+                ))),
+            } {
+                error!("error during instance shutdown: {}", e);
+                if result.is_ok() {
+                    result = Err(e);
+                }
+            }
+        }
+    };
+    if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
+        error!(
+            "graceful shutdown timed out after {}s, aborting remaining instances",
+            DRAIN_TIMEOUT.as_secs()
+        );
+        tasks.abort_all();
+        while let Some(res) = tasks.join_next().await {
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!("error during instance shutdown: {}", e),
+                Err(join_err) if join_err.is_cancelled() => {
+                    error!("instance aborted after shutdown timeout")
+                }
+                Err(join_err) => error!("instance task failed: {}", join_err),
+            }
+        }
+    }
+    result
 }
