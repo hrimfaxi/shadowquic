@@ -60,13 +60,7 @@ async fn start(half_close_timeout: u64) -> Started {
     })
     .await
     .unwrap();
-    tokio::spawn(
-        Manager {
-            inbound: Box::new(sq_server),
-            outbound: Box::new(DirectOut::default()),
-        }
-        .run(),
-    );
+    tokio::spawn(Manager::new(Box::new(sq_server), Box::new(DirectOut::default())).run());
 
     let socks_addr = unused_tcp_addr();
     let socks_server = SocksServer::new(SocksServerCfg {
@@ -88,13 +82,7 @@ async fn start(half_close_timeout: u64) -> Started {
         half_close_timeout,
         ..Default::default()
     });
-    tokio::spawn(
-        Manager {
-            inbound: Box::new(socks_server),
-            outbound: Box::new(sq_client),
-        }
-        .run(),
-    );
+    tokio::spawn(Manager::new(Box::new(socks_server), Box::new(sq_client)).run());
 
     let (ended_tx, ended) = mpsc::channel(1);
     tokio::spawn(peer(upstream_listener, ended_tx));
