@@ -185,6 +185,19 @@ impl Inbound for FailInitInbound {
     }
 }
 
+/// Inbound whose `shutdown` never returns (e.g. a hung flush).
+struct HungShutdownInbound;
+
+#[async_trait]
+impl Inbound for HungShutdownInbound {
+    async fn accept(&mut self) -> Result<ProxyRequest, SError> {
+        std::future::pending().await
+    }
+    async fn shutdown(&self) -> Result<(), SError> {
+        std::future::pending().await
+    }
+}
+
 #[tokio::test]
 async fn test_instance_panic_triggers_graceful_shutdown_of_others() {
     let shutdown_called = Arc::new(AtomicBool::new(false));
@@ -245,4 +258,27 @@ async fn test_empty_instances_is_rejected() {
         matches!(result, Err(SError::Instance(_))),
         "empty manager must be rejected with SError::Instance, got {result:?}"
     );
+}
+
+/// A hung `shutdown` during rollback must not stall startup: the rollback is
+/// bounded by the drain timeout and the init error still surfaces. The paused
+/// tokio clock keeps the DRAIN_TIMEOUT wait instant.
+#[tokio::test(start_paused = true)]
+async fn test_rollback_shutdown_timeout_does_not_hang_startup() {
+    let manager = Manager::with_instances(vec![
+        Instance::new(Box::new(HungShutdownInbound), Box::new(NopOutbound)),
+        Instance::new(Box::new(FailInitInbound), Box::new(NopOutbound)),
+    ]);
+    let result = tokio::time::timeout(Duration::from_secs(60), manager.run())
+        .await
+        .expect("run() must return even when a rollback shutdown hangs");
+    match result {
+        Err(SError::Instance(msg)) => {
+            assert!(
+                msg.contains("instance 1 init failed"),
+                "init failure must surface, got: {msg}"
+            );
+        }
+        other => panic!("expected instance init failure, got {other:?}"),
+    }
 }

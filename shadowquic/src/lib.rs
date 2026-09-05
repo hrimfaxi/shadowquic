@@ -191,9 +191,21 @@ impl Manager {
                 error!(instance = i, "instance init failed: {}", e);
                 // Roll back instances initialized so far (best effort), e.g. to
                 // flush their persistent state, and surface the init error.
+                // Each shutdown is bounded so one hung inbound cannot stall
+                // startup forever.
                 for (j, prev) in self.instances[..i].iter().enumerate() {
-                    if let Err(e) = prev.inbound.shutdown().await {
-                        error!(instance = j, "error during rollback shutdown: {}", e);
+                    match tokio::time::timeout(DRAIN_TIMEOUT, prev.inbound.shutdown()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            error!(instance = j, "error during rollback shutdown: {}", e)
+                        }
+                        Err(_) => {
+                            error!(
+                                instance = j,
+                                "rollback shutdown timed out after {}s",
+                                DRAIN_TIMEOUT.as_secs()
+                            )
+                        }
                     }
                 }
                 return Err(SError::Instance(format!("instance {i} init failed: {e}")));
@@ -215,7 +227,10 @@ impl Manager {
             };
             let task = async move {
                 loop {
+                    // biased: once the shutdown signal is out, it strictly
+                    // outranks accepting new requests.
                     tokio::select! {
+                        biased;
                         _ = shutdown_rx.changed() => {
                             inst.inbound.shutdown().await?;
                             return Ok(());
@@ -273,7 +288,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// (subsequent errors are logged). The shutdown signal must already be sent.
 ///
 /// Graceful draining is bounded by [`DRAIN_TIMEOUT`]; instances still
-/// running when it expires are aborted.
+/// running when it expires are aborted and reported as an error.
 async fn drain_instances(tasks: &mut JoinSet<Result<(), SError>>) -> Result<(), SError> {
     let mut result = Ok(());
     let drain = async {
@@ -297,6 +312,14 @@ async fn drain_instances(tasks: &mut JoinSet<Result<(), SError>>) -> Result<(), 
             "graceful shutdown timed out after {}s, aborting remaining instances",
             DRAIN_TIMEOUT.as_secs()
         );
+        // Surface the forced abort to the caller: instances killed here did
+        // not flush their persistent state.
+        if result.is_ok() {
+            result = Err(SError::Instance(format!(
+                "graceful shutdown timed out after {}s, remaining instances aborted",
+                DRAIN_TIMEOUT.as_secs()
+            )));
+        }
         tasks.abort_all();
         while let Some(res) = tasks.join_next().await {
             match res {
@@ -310,4 +333,23 @@ async fn drain_instances(tasks: &mut JoinSet<Result<(), SError>>) -> Result<(), 
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Draining must be bounded: a task that never finishes is aborted after
+    /// [`DRAIN_TIMEOUT`] and the forced abort surfaces as an error. The
+    /// paused tokio clock keeps the [`DRAIN_TIMEOUT`] wait instant.
+    #[tokio::test(start_paused = true)]
+    async fn drain_timeout_surfaces_error() {
+        let mut tasks: JoinSet<Result<(), SError>> = JoinSet::new();
+        tasks.spawn(std::future::pending());
+        let result = drain_instances(&mut tasks).await;
+        assert!(
+            matches!(result, Err(SError::Instance(_))),
+            "drain timeout must surface as Err, got {result:?}"
+        );
+    }
 }
