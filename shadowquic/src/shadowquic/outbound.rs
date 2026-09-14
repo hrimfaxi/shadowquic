@@ -184,10 +184,20 @@ impl Outbound for ShadowQuicClient {
     async fn handle(&mut self, req: crate::ProxyRequest) -> Result<(), crate::error::SError> {
         self.prepare_conn().await?;
 
-        let conn = self.quic_conn.as_mut().unwrap().clone();
+        let conn = self
+            .quic_conn
+            .as_ref()
+            .expect("prepare_conn leaves quic_conn set")
+            .clone();
 
         let over_stream = self.config.over_stream;
-        outbound::handle_request(req, conn, over_stream).await?;
-        Ok(())
+        match outbound::dispatch(req, conn, over_stream).await? {
+            outbound::Dispatch::Sent => Ok(()),
+            outbound::Dispatch::Wedged => {
+                self.quic_conn = None;
+                Err(SError::OutboundUnavailable)
+            }
+            outbound::Dispatch::StillActive => Err(SError::OutboundUnavailable),
+        }
     }
 }
