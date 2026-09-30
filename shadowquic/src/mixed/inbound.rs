@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -18,19 +19,83 @@ use crate::{
 };
 
 pub struct MixedServer {
-    cfg: MixedServerCfg,
+    http: Arc<HttpProxyServer>,
+    users: Arc<Vec<AuthUser>>,
     request_sender: Sender<ProxyRequest>,
     request_receiver: Receiver<ProxyRequest>,
+    /// Owned here, not by a spawned task. An `accept(2)` failure has to reach
+    /// the caller of `accept`, and a listener whose only owner is a detached
+    /// task has nobody to report one to: the task ends, the listener is
+    /// dropped with it, and the port closes with no error line anywhere.
+    listener: TcpListener,
 }
 
 impl MixedServer {
     pub async fn new(cfg: MixedServerCfg) -> Result<Self, SError> {
+        let listener = Self::bind(cfg.bind_addr)?;
+        let http = Arc::new(HttpProxyServer::with_users(
+            cfg.users
+                .iter()
+                .map(|u| ProxyBasicAuth {
+                    username: u.username.clone(),
+                    password: u.password.clone(),
+                })
+                .collect(),
+        ));
+        let users = Arc::new(cfg.users.clone());
         let (s, r) = channel(20);
         Ok(Self {
-            cfg,
+            http,
+            users,
             request_sender: s,
             request_receiver: r,
+            listener,
         })
+    }
+
+    fn bind(bind_addr: SocketAddr) -> Result<TcpListener, SError> {
+        let dual_stack = bind_addr.is_ipv6();
+        let socket = Socket::new(
+            if dual_stack {
+                Domain::IPV6
+            } else {
+                Domain::IPV4
+            },
+            Type::STREAM,
+            Some(Protocol::TCP),
+        )?;
+        if dual_stack {
+            let _ = socket
+                .set_only_v6(false)
+                .map_err(|e| tracing::warn!("failed to set dual stack for socket: {}", e));
+        }
+        socket.set_reuse_address(true)?;
+        socket.set_nonblocking(true)?;
+        socket.bind(&bind_addr.into())?;
+        socket.listen(256)?;
+        TcpListener::from_std(socket.into())
+            .map_err(|e| SError::SocksError(format!("failed to create TcpListener: {e}")))
+    }
+
+    /// Runs one accepted connection in a task of its own, so a client that
+    /// stalls mid-handshake cannot hold up the next `accept`.
+    fn spawn_handshake(&self, stream: TcpStream, addr: SocketAddr) {
+        // Same reason as socks/inbound.rs: the handshake replies are written
+        // field by field, so Nagle plus the peer's delayed ACK costs about
+        // 40ms per connection unless it is off.
+        let _ = stream.set_nodelay(true);
+        let span = info_span!("mixed", src = %addr);
+        let http = self.http.clone();
+        let users = self.users.clone();
+        let req_send = self.request_sender.clone();
+        tokio::spawn(
+            async move {
+                if let Err(x) = handle_connection(stream, http, users, req_send).await {
+                    error!("failed to handle mixed connection: {}", x)
+                }
+            }
+            .instrument(span),
+        );
     }
 }
 
@@ -68,78 +133,22 @@ async fn handle_connection(
 #[async_trait]
 impl Inbound for MixedServer {
     async fn accept(&mut self) -> Result<ProxyRequest, SError> {
-        let recv = self
-            .request_receiver
-            .recv()
-            .await
-            .ok_or(SError::InboundUnavailable)?;
-        Ok(recv)
-    }
-
-    async fn init(&self) -> Result<(), SError> {
-        let bind_addr = self.cfg.bind_addr;
-        let dual_stack = bind_addr.is_ipv6();
-        let socket = Socket::new(
-            if dual_stack {
-                Domain::IPV6
-            } else {
-                Domain::IPV4
-            },
-            Type::STREAM,
-            Some(Protocol::TCP),
-        )?;
-        if dual_stack {
-            let _ = socket
-                .set_only_v6(false)
-                .map_err(|e| tracing::warn!("failed to set dual stack for socket: {}", e));
-        }
-        socket.set_reuse_address(true)?;
-        socket.set_nonblocking(true)?;
-        socket.bind(&bind_addr.into())?;
-        socket.listen(256)?;
-
-        let listener = TcpListener::from_std(socket.into())
-            .map_err(|e| SError::SocksError(format!("failed to create TcpListener: {e}")))?;
-
-        let http_users = self
-            .cfg
-            .users
-            .iter()
-            .map(|u| ProxyBasicAuth {
-                username: u.username.clone(),
-                password: u.password.clone(),
-            })
-            .collect();
-
-        let http = Arc::new(HttpProxyServer::with_users(http_users));
-        let users = Arc::new(self.cfg.users.clone());
-        let req_send = self.request_sender.clone();
-
-        let fut = async move {
-            loop {
-                let (stream, addr) = listener.accept().await?;
-                // Same reason as socks/inbound.rs: the handshake replies are written
-                // field by field, so Nagle plus the peer's delayed ACK costs about
-                // 40ms per connection unless it is off.
-                let _ = stream.set_nodelay(true);
-                let span = info_span!("mixed", src = %addr);
-                let http = http.clone();
-                let users = users.clone();
-                let req_send = req_send.clone();
-                tokio::spawn(
-                    async move {
-                        handle_connection(stream, http, users, req_send)
-                            .await
-                            .map_err(|x| error!("failed to handle mixed connection: {}", x))
+        loop {
+            let accepted = {
+                let listener = &self.listener;
+                let receiver = &mut self.request_receiver;
+                tokio::select! {
+                    // An accept(2) failure is returned to the caller, which
+                    // logs it and retries with backoff. The listener is a field
+                    // of this struct, so the error cannot take the port with
+                    // it: the next `accept` keeps serving.
+                    accepted = listener.accept() => accepted?,
+                    request = receiver.recv() => {
+                        return request.ok_or(SError::InboundUnavailable);
                     }
-                    .instrument(span),
-                );
-            }
-            #[allow(unreachable_code)]
-            SResult::<()>::Ok(())
-        };
-        tokio::spawn(fut.in_current_span());
-
-        Ok(())
+                }
+            };
+            self.spawn_handshake(accepted.0, accepted.1);
+        }
     }
 }

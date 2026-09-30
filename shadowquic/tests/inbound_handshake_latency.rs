@@ -8,8 +8,8 @@
 //! not affected, which is what the comparison below shows.
 //!
 //! These tests drive the inbound directly and need no outbound: the handshake is
-//! answered by the inbound's own accept loop before the request is dispatched, so
-//! it completes whatever the outbound is doing.
+//! answered by the inbound's per-connection task before the request is
+//! dispatched, so it completes whatever the outbound is doing.
 //!
 //! The assertion is a latency bound rather than a socket-option check because the
 //! option is not observable from outside the process. What matters is that the
@@ -37,22 +37,28 @@ fn median(samples: &mut [Duration]) -> Duration {
     samples[samples.len() / 2]
 }
 
-/// The inbound listeners are bound by a spawned task, so retry briefly instead of
-/// guessing how long it takes to come up.
-async fn connect_retrying(addr: SocketAddr) -> TcpStream {
-    for _ in 0..200 {
-        if let Ok(stream) = TcpStream::connect(addr).await {
-            return stream;
+/// The listener is the inbound's own field and only serves while `accept` is
+/// polled — driving it is the manager's job — so these tests run a driver of
+/// their own. Requests are dropped: the handshake is answered before a request
+/// is dispatched, which is all these tests time.
+fn drive(mut inbound: Box<dyn Inbound>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let _ = inbound.accept().await;
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("the inbound listener at {addr} never came up");
+    })
+}
+
+/// Binding happens in `new`, so the listener is already up; the kernel completes
+/// the connect from the backlog whether or not `accept` has run yet.
+async fn connect(addr: SocketAddr) -> TcpStream {
+    TcpStream::connect(addr).await.unwrap()
 }
 
 /// Drives one full SOCKS5 no-auth handshake and returns how long the negotiation
 /// took, excluding the TCP connect.
 async fn socks_handshake(addr: SocketAddr, dst: SocketAddr) -> Duration {
-    let mut stream = connect_retrying(addr).await;
+    let mut stream = connect(addr).await;
     let started = Instant::now();
 
     stream.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
@@ -87,7 +93,7 @@ async fn socks_handshake(addr: SocketAddr, dst: SocketAddr) -> Duration {
 /// TCP connect. Its reply is a single write, so it is the control.
 #[cfg(feature = "mixed")]
 async fn http_handshake(addr: SocketAddr, dst: SocketAddr) -> Duration {
-    let mut stream = connect_retrying(addr).await;
+    let mut stream = connect(addr).await;
     let started = Instant::now();
 
     let request = format!("CONNECT {dst} HTTP/1.1\r\nHost: {dst}\r\n\r\n");
@@ -124,8 +130,6 @@ fn some_dst() -> SocketAddr {
 #[tokio::test]
 async fn the_socks_inbound_handshake_is_not_delayed() {
     let addr = unused_tcp_addr();
-    // Held for the whole test: dropping it closes the request channel, and the
-    // handlers would then log an error after the handshake they are here to time.
     let inbound = SocksServer::new(SocksServerCfg {
         tag: "test-socks".into(),
         bind_addr: addr,
@@ -133,7 +137,9 @@ async fn the_socks_inbound_handshake_is_not_delayed() {
     })
     .await
     .unwrap();
-    inbound.init().await.unwrap();
+    // Held for the whole test: dropping it closes the request channel, and the
+    // handlers would then log an error after the handshake they are here to time.
+    let _driver = drive(Box::new(inbound));
 
     let mut samples = Vec::with_capacity(CONNECTIONS);
     for _ in 0..CONNECTIONS {
@@ -150,6 +156,37 @@ async fn the_socks_inbound_handshake_is_not_delayed() {
         "the SOCKS5 handshake took {median:?} (bound {BOUND:?}); the accepted socket \
          has Nagle enabled, so the field-by-field reply waits for the peer's \
          delayed acknowledgement"
+    );
+}
+
+/// The inbound answers each handshake in a task of its own, so one client that
+/// connects and then says nothing cannot hold up the next connection. The
+/// stalled client is left open for the whole test on purpose.
+#[tokio::test]
+async fn a_stalled_handshake_does_not_block_the_next_connection() {
+    let addr = unused_tcp_addr();
+    let inbound = SocksServer::new(SocksServerCfg {
+        tag: "test-socks".into(),
+        bind_addr: addr,
+        users: vec![],
+    })
+    .await
+    .unwrap();
+    let _driver = drive(Box::new(inbound));
+
+    let _stalled = connect(addr).await;
+
+    // The deadline turns a stalled handshake into a failure instead of a hung
+    // test, which is what running the handshake inline would produce.
+    let took = tokio::time::timeout(Duration::from_secs(2), socks_handshake(addr, some_dst()))
+        .await
+        .expect(
+            "a handshake behind a stalled client never completed: the handshake is being \
+             run inline instead of in a task of its own",
+        );
+    assert!(
+        took < BOUND,
+        "a handshake behind a stalled client took {took:?} (bound {BOUND:?})"
     );
 }
 
@@ -170,7 +207,7 @@ async fn the_mixed_inbound_handshake_is_not_delayed() {
     })
     .await
     .unwrap();
-    inbound.init().await.unwrap();
+    let _driver = drive(Box::new(inbound));
 
     let mut socks = Vec::with_capacity(CONNECTIONS);
     let mut http = Vec::with_capacity(CONNECTIONS);

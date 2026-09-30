@@ -3,6 +3,7 @@ use std::{
     future::Future,
     net::SocketAddr,
     sync::{Arc, Weak},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -180,7 +181,16 @@ impl TcpTrait for TcpStream {
 
 #[async_trait]
 pub trait Inbound<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend>: Send + Sync + Unpin {
+    /// Returns the next accepted request.
+    ///
+    /// This is what drives an inbound: the TCP inbounds serve only while it is
+    /// being polled, because they own their listener and hand it out here. An
+    /// error is the caller's to log and retry — it must not cost the inbound
+    /// its port.
     async fn accept(&mut self) -> Result<ProxyRequest<T, I, O>, SError>;
+    /// Optional one-time setup, called once before the accept loop starts. The
+    /// TCP inbounds bind their listener in their constructor and implement
+    /// nothing here.
     async fn init(&self) -> Result<(), SError> {
         Ok(())
     }
@@ -239,6 +249,12 @@ async fn shutdown_signal() {
     }
 }
 
+/// Backoff for an inbound whose `accept` keeps failing, so a listener that
+/// cannot accept right now — a full process fd table, say — does not spin this
+/// loop. Reset as soon as a request is accepted.
+const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(10);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
+
 impl Manager {
     /// Construct a manager for one inbound/outbound pair.
     pub fn single(inbound: Box<dyn Inbound>, outbound: Arc<dyn Outbound>) -> Self {
@@ -296,12 +312,14 @@ impl Manager {
             let default_outbound = default_outbound.clone();
             let mut stopped = stopped.clone();
             tasks.spawn(async move {
+                let mut backoff = ACCEPT_BACKOFF_MIN;
                 loop {
                     tokio::select! {
                         biased;
                         _ = stopped.changed() => break,
                         req = inbound.accept() => match req {
                             Ok(mut req) => {
+                                backoff = ACCEPT_BACKOFF_MIN;
                                 req.set_inbound_tag(tag.clone());
                                 #[cfg(feature = "plugin")]
                                 let outbound_tag = match router.as_ref() {
@@ -347,7 +365,15 @@ impl Manager {
                             }
                             Err(error) => {
                                 error!(inbound = %tag, %error, "error accepting request");
-                                tokio::task::yield_now().await;
+                                // A failing accept must not spin this loop. The
+                                // wait keeps observing the stop signal, so a
+                                // shutdown is not delayed by it.
+                                tokio::select! {
+                                    biased;
+                                    _ = stopped.changed() => break,
+                                    _ = tokio::time::sleep(backoff) => {}
+                                }
+                                backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
                             }
                         }
                     }
