@@ -1,49 +1,4 @@
-//! Optional per-request routing with a restricted Lua script.
-//!
-//! Enable the `plugin` Cargo feature and put source code directly in `router`:
-//!
-//! ```yaml
-//! router: |
-//!   return function(ctx)
-//!       return "direct"
-//!   end
-//! ```
-//! Alternatively, set `router-script: router.lua` to read the source from a
-//! file. File changes reload automatically; failed reloads keep the last working
-//! script. Configure only one of these fields.
-//!
-//! The script must return a function. ShadowQUIC calls it with one context
-//! userdata containing `inbound_tag`, `network_type` (`"tcp"` or `"udp"`), `dst_domain`,
-//! `dst_ip_v4`, `dst_ip_v6`, `dst_port`, and
-//! source address fields `src_addr`, `src_ip_v4`, `src_ip_v6`, and `src_port`,
-//! plus optional `stats_context`. Address values are strings. Source fields
-//! are nil when the inbound does not provide a source address. When the request
-//! is authenticated, `stats_context` contains `username` and `conn_id`; otherwise
-//! it is nil. Scripts may update `dst_domain`, `dst_ip_v4`, `dst_ip_v6`, and
-//! `dst_port`; setting one destination name or IP clears the other name/IP fields.
-//!
-//! Return an outbound tag to route the request, or `nil, error_message` to
-//! reject routing. The tag must match an outbound in the config.
-//!
-//! ```lua
-//! return function(ctx)
-//!     if ctx.dst_domain and string.match(ctx.dst_domain, "%.example$") then
-//!         return "special-proxy"
-//!     end
-//!
-//!     if ctx.dst_ip_v4 and ctx.dst_ip_v4:sub(1, #"192.168") == "192.168" then
-//!         print("routing traffic backhome") -- for debugging
-//!         return "sq-home"
-//!     end
-//!
-//!     return "direct"
-//! end
-//! ```
-//!
-//! Routing scripts have base language functions and string, table, and math
-//! helpers, without filesystem, process, or module loading access. Console
-//! output through `print` is allowed.
-//! See [`Router`] and [`RouteContext`] for the Rust interfaces.
+//! Lua routing runtime. See [`crate::config::RouterCfg`] for configuration and script examples.
 
 use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -70,17 +25,16 @@ pub enum NetworkType {
 /// Request information exposed to a routing script.
 #[derive(Clone)]
 pub struct RouteContext {
-    /// Destination domain. Scripts may update these to rewrite the
-    /// request destination. Setting one of these clears the others.
+    /// Destination domain. Scripts may update these for TCP requests only.
+    /// Setting one of these clears the others.
     pub dst_domain: Option<String>,
-    /// Destination ipv4 address. Scripts may update these to rewrite the
-    /// request destination. Setting one of these clears the others.
+    /// Destination ipv4 address. Scripts may update these for TCP requests only.
+    /// Setting one of these clears the others.
     pub dst_ip_v4: Option<Ipv4Addr>,
-    /// Destination ipv6 address. Scripts may update these to rewrite the
-    /// request destination. Setting one of these clears the others.
+    /// Destination ipv6 address. Scripts may update these for TCP requests only.
+    /// Setting one of these clears the others.
     pub dst_ip_v6: Option<Ipv6Addr>,
-    /// Destination address port. Scripts may update these to rewrite the
-    /// request destination.
+    /// Destination port. Scripts may update this for TCP requests only.
     pub dst_port: Option<u16>,
     pub src_addr: Option<SocketAddr>,
     pub src_ip_v4: Option<Ipv4Addr>,
@@ -110,6 +64,7 @@ impl UserData for RouteContext {
         });
         fields.add_field_method_get("dst_port", |_, this| Ok(this.dst_port));
         fields.add_field_method_set("dst_domain", |_, this, value: Option<String>| {
+            this.ensure_destination_writable("dst_domain")?;
             this.dst_domain = value;
             if this.dst_domain.is_some() {
                 this.dst_ip_v4 = None;
@@ -118,6 +73,7 @@ impl UserData for RouteContext {
             Ok(())
         });
         fields.add_field_method_set("dst_ip_v4", |_, this, value: Option<String>| {
+            this.ensure_destination_writable("dst_ip_v4")?;
             this.dst_ip_v4 = value
                 .map(|value| value.parse())
                 .transpose()
@@ -129,6 +85,7 @@ impl UserData for RouteContext {
             Ok(())
         });
         fields.add_field_method_set("dst_ip_v6", |_, this, value: Option<String>| {
+            this.ensure_destination_writable("dst_ip_v6")?;
             this.dst_ip_v6 = value
                 .map(|value| value.parse())
                 .transpose()
@@ -140,6 +97,7 @@ impl UserData for RouteContext {
             Ok(())
         });
         fields.add_field_method_set("dst_port", |_, this, value: Option<u16>| {
+            this.ensure_destination_writable("dst_port")?;
             this.dst_port = value;
             Ok(())
         });
@@ -166,6 +124,15 @@ impl UserData for RouteContext {
 }
 
 impl RouteContext {
+    fn ensure_destination_writable(&self, field: &str) -> mlua::Result<()> {
+        if self.network_type == NetworkType::Udp {
+            return Err(mlua::Error::runtime(format!(
+                "cannot write {field} when network_type is udp"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn from_request(req: &ProxyRequest) -> Self {
         match req {
             ProxyRequest::Tcp(TcpSession {
@@ -655,6 +622,45 @@ mod tests {
         assert_eq!(router.route(&mut context).unwrap(), "secure");
         let rewritten = context.destination().unwrap();
         assert_eq!(rewritten.to_string(), "192.0.2.44:8443");
+    }
+
+    #[test]
+    fn lua_router_rejects_udp_destination_writes() {
+        for (field, value) in [
+            ("dst_domain", "'rewritten.example'"),
+            ("dst_ip_v4", "'192.0.2.44'"),
+            ("dst_ip_v6", "'2001:db8::1'"),
+            ("dst_port", "8443"),
+        ] {
+            for value in [value, "nil"] {
+                let mut context = context();
+                context.network_type = NetworkType::Udp;
+                if field == "dst_ip_v4" {
+                    context.dst_domain = None;
+                    context.dst_ip_v4 = Some("192.0.2.10".parse().unwrap());
+                } else if field == "dst_ip_v6" {
+                    context.dst_domain = None;
+                    context.dst_ip_v6 = Some("2001:db8::10".parse().unwrap());
+                }
+                let lua = Lua::new();
+                let userdata = lua.create_userdata(context.clone()).unwrap();
+                lua.globals().set("ctx", userdata.clone()).unwrap();
+                let error = lua
+                    .load(format!("ctx.{field} = {value}"))
+                    .exec()
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("cannot write {field} when network_type is udp"))
+                );
+                let unchanged = userdata.borrow::<RouteContext>().unwrap();
+                assert_eq!(unchanged.dst_domain, context.dst_domain);
+                assert_eq!(unchanged.dst_ip_v4, context.dst_ip_v4);
+                assert_eq!(unchanged.dst_ip_v6, context.dst_ip_v6);
+                assert_eq!(unchanged.dst_port, context.dst_port);
+            }
+        }
     }
 
     #[test]

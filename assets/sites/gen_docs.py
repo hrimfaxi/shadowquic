@@ -41,7 +41,7 @@ CONFIG_SRC_PREFIX = "shadowquic/src/config/"
 
 def build_rustdoc_json(repo_root: Path) -> Path:
     """Invoke `cargo +nightly rustdoc` and return the JSON path."""
-    out = repo_root / "target" / "doc" / "shadowquic.json"
+    out = Path(os.environ.get("CARGO_TARGET_DIR", repo_root / "target")) / "doc" / "shadowquic.json"
     cmd = [
         "cargo",
         "+nightly",
@@ -1098,6 +1098,16 @@ def plan_pages(
             ))
             placed.add(it.name)
 
+    # Router is a top-level configuration section in newer versions. Older
+    # releases do not have RouterCfg and must not get a dangling navigation link.
+    router = next((it for it in discovered if it.name == "RouterCfg"), None)
+    if router is not None:
+        pages.append(PageSpec(
+            title="Router", nav_label="Router",
+            rel_path="configuration/router.md", item_id=int(router.id),
+        ))
+        placed.add("RouterCfg")
+
     # Everything else reachable from the roots becomes a shared type page.
     for it in discovered:
         if it.name in placed or not it.name:
@@ -1123,7 +1133,9 @@ NAV_BEGIN = "# >>> generated nav"
 NAV_END = "# <<< generated nav"
 
 
-def render_nav(pages: list[PageSpec], include_protocol: bool = False) -> str:
+def render_nav(
+    pages: list[PageSpec], include_protocol: bool = False, include_api: bool = True,
+) -> str:
     """Render a `nav = [...]` TOML block matching the page layout."""
     # Group pages by their second path component (configuration/<group>/...).
     cfg_pages = [p for p in pages if p.rel_path.startswith("configuration/")]
@@ -1156,6 +1168,10 @@ def render_nav(pages: list[PageSpec], include_protocol: bool = False) -> str:
             lines.append(f'      {{ "{label}" = "{p.rel_path}" }}{comma}')
         lines.append('    ] },')
 
+    for p in cfg_pages:
+        if p.rel_path == "configuration/router.md":
+            lines.append(f'    {{ "Router" = "{p.rel_path}" }},')
+
     if shared_pages:
         lines.append('    { "Shared types" = [')
         for i, p in enumerate(shared_pages):
@@ -1164,7 +1180,8 @@ def render_nav(pages: list[PageSpec], include_protocol: bool = False) -> str:
         lines.append('    ] }')
 
     lines.append('  ] },')
-    lines.append(f'  {{ "{API_NAV_LABEL}" = "{API_REL_PATH}" }},')
+    if include_api:
+        lines.append(f'  {{ "{API_NAV_LABEL}" = "{API_REL_PATH}" }},')
     if include_protocol:
         lines.append(f'  {{ "{PROTOCOL_NAV_LABEL}" = "{PROTOCOL_REL_DIR}/index.md" }}')
     else:
@@ -1206,28 +1223,8 @@ so they stay in sync with the actual deserializer.
 - [Inbound types](configuration/inbound/index.md)
 - [Outbound types](configuration/outbound/index.md)
 
-## Example
+See the configuration reference for the schema and examples for this version.
 
-```yaml
-inbounds:
-- tag: socks-in
-  type: socks
-  bind-addr: "127.0.0.1:1089"
-outbounds:
-- tag: proxy-out
-  type: shadowquic
-  addr: "your.server.example:443"
-  username: "alice"
-  password: "secret"
-  server-name: "your.server.example"
-log-level: info
-```
-
-Save as `config.yaml` and run:
-
-```sh
-shadowquic -c config.yaml
-```
 """
 
 
@@ -1258,6 +1255,10 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-protocol",
         action="store_true",
         help="don't render PROTOCOL.typ; useful when typst isn't installed",
+    )
+    parser.add_argument(
+        "--source-ref", default="main",
+        help="Git ref used for source links in generated documentation",
     )
     args = parser.parse_args(argv)
 
@@ -1318,12 +1319,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {out_path.relative_to(REPO_ROOT)}", file=sys.stderr)
 
     # User-management API reference
-    out_path = write_api_page(REPO_ROOT)
-    print(f"wrote {out_path.relative_to(REPO_ROOT)}", file=sys.stderr)
+    include_api = (REPO_ROOT / API_SOURCE_NAME).exists()
+    if include_api:
+        out_path = write_api_page(REPO_ROOT)
+        print(f"wrote {out_path.relative_to(REPO_ROOT)}", file=sys.stderr)
+    else:
+        (DOCS_ROOT / API_REL_PATH).unlink(missing_ok=True)
 
     # Protocol spec (PROTOCOL.typ -> SVG pages -> markdown)
     include_protocol = False
-    if not args.skip_protocol:
+    if not args.skip_protocol and (REPO_ROOT / PROTOCOL_SOURCE_NAME).exists():
         if shutil.which("typst") is None:
             print(
                 "warn: `typst` not found on PATH; skipping PROTOCOL.typ render. "
@@ -1341,10 +1346,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {out_path.relative_to(REPO_ROOT)}", file=sys.stderr)
             include_protocol = True
 
+    # Historical pages must link to the corresponding source revision.
+    for page in DOCS_ROOT.rglob("*.md"):
+        text = page.read_text()
+        for kind in ("tree", "blob", "raw"):
+            prefix = f"https://github.com/spongebob888/shadowquic/{kind}/"
+            text = text.replace(prefix + "main/", prefix + args.source_ref + "/")
+        page.write_text(text)
+
     # Update nav
     patch_zensical_nav(
         SITE_ROOT / "zensical.toml",
-        render_nav(pages, include_protocol=include_protocol),
+        render_nav(pages, include_protocol=include_protocol, include_api=include_api),
     )
     print(
         f"updated nav in {(SITE_ROOT / 'zensical.toml').relative_to(REPO_ROOT)}",

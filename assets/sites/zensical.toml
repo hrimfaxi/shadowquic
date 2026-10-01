@@ -15,16 +15,20 @@ nav = [
     { "Inbound" = [
       { "Overview" = "configuration/inbound/index.md" },
       { "Socks server" = "configuration/inbound/socks.md" },
+      { "Mixed server" = "configuration/inbound/mixed.md" },
       { "ShadowQuic server" = "configuration/inbound/shadowquic.md" },
-      { "SunnyQuic server" = "configuration/inbound/sunnyquic.md" }
+      { "SunnyQuic server" = "configuration/inbound/sunnyquic.md" },
+      { "Tproxy server" = "configuration/inbound/tproxy.md" }
     ] },
     { "Outbound" = [
       { "Overview" = "configuration/outbound/index.md" },
       { "Socks outbound" = "configuration/outbound/socks.md" },
       { "ShadowQuic outbound" = "configuration/outbound/shadowquic.md" },
       { "SunnyQuic outbound" = "configuration/outbound/sunnyquic.md" },
-      { "Direct outbound" = "configuration/outbound/direct.md" }
+      { "Direct outbound" = "configuration/outbound/direct.md" },
+      { "Drop outbound" = "configuration/outbound/drop.md" }
     ] },
+    { "Router" = "configuration/router.md" },
     { "Shared types" = [
       { "Log level" = "configuration/shared/loglevel.md" },
       { "Auth user" = "configuration/shared/authuser.md" },
@@ -90,3 +94,8 @@ anchor_linenums = true
 [project.markdown_extensions.pymdownx.superfences]
 [project.markdown_extensions.pymdownx.tabbed]
 alternate_style = true
+
+# mike provides the header version selector and resolves the latest alias.
+[project.extra.version]
+provider = "mike"
+alias = true
