@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(feature = "plugin", feature = "dns-server"))]
+use crate::dns::ResolverManager;
 use crate::error::SError;
 #[cfg(feature = "plugin")]
 use crate::plugin::router::Router;
+#[cfg(all(feature = "plugin", feature = "dns-server"))]
+use std::sync::Arc;
 
 /// Request routing through a default outbound or a restricted Lua script.
 ///
@@ -20,6 +24,10 @@ use crate::plugin::router::Router;
 /// selects the outbound instead of `default-outbound`.
 ///
 /// ```yaml
+/// dns:
+///   - tag: dns-in
+///     type: dns-udp
+///     bind-addr: 0.0.0.0:5553
 /// router:
 ///   src: |
 ///     return function(ctx)
@@ -29,6 +37,10 @@ use crate::plugin::router::Router;
 ///
 ///       if ctx.dst_ip_v4 and ctx.dst_ip_v4:sub(1, #"192.168") == "192.168" then
 ///         return "sq-home"
+///       end
+///
+///       if ctx.dst_port == 53 and ctx.network_type == "udp" then
+///         return "dns-in" -- dns hijacking
 ///       end
 ///
 ///       return "direct"
@@ -46,12 +58,15 @@ use crate::plugin::router::Router;
 /// editor replaces the file. Failed reloads keep the last working script. A
 /// successful reload resets Lua state; existing connections are unaffected.
 /// Inline scripts are not watched.
+/// Routing is asynchronous: suspended calls keep their original script runtime
+/// when a reload occurs, while new calls use the replacement.
 ///
 /// The script must return a function. Each request passes one context userdata:
 ///
 /// | Field | Value |
 /// | --- | --- |
 /// | `inbound_tag` | Tag of the inbound listener |
+/// | `dns_query` | Array of tables with `name` and numeric `record_type`; empty when no DNS metadata is attached |
 /// | `network_type` | `"tcp"` or `"udp"` |
 /// | `dst_domain`, `dst_ip_v4`, `dst_ip_v6` | Destination name or IP string; unused fields are nil |
 /// | `dst_port` | Destination port number |
@@ -63,12 +78,26 @@ use crate::plugin::router::Router;
 /// for TCP requests. Writing these fields for UDP requests raises an error,
 /// including assigning nil.
 /// Setting a destination name or IP clears the other destination address fields.
+/// `dns_query` is a snapshot: changing its tables does not modify the request.
 /// Return a configured outbound tag to route the request, or `nil, error_message`
 /// to reject it. Routing errors do not fall back to `router.default-outbound`.
 ///
 /// Scripts have base language functions and string, table, math, and bit helpers.
 /// Filesystem, process, module loading, and dynamic code loading are unavailable.
-/// Console output through `print` is allowed.
+///
+/// | API | Behavior | Availability |
+/// | --- | --- | --- |
+/// | `print(...)` | Writes console output | Script loading and routing |
+/// | `info(message)` | Accepts a string and emits a `tracing::info!` log using the application's logging filters | Script loading and routing |
+/// | `lookup(dns_tag, domain)` | Returns an array of IP strings and may block router. | Inside the returned routing function; requires `dns-server` |
+/// | `reverse_lookup(dns_tag, ip)` | Returns an array of PTR hostname strings and may block router| Inside the returned routing function; requires `dns-server` |
+/// | `lookup_cache(domain)` | Returns an array of cached IP strings, or an empty array on a miss; domain names are case insensitive | Script loading and routing; requires `dns-server` |
+/// | `reverse_lookup_cache(ip)` | Returns the most recently cached hostname from matching A/AAAA or PTR answers, or nil on a miss; invalid IP strings raise a Lua error | Script loading and routing; requires `dns-server` |
+///
+/// Cache lookups use the shared DNS cache, ignore expired entries, and perform
+/// no network I/O or asynchronous suspension. They do not take a DNS service tag.
+/// `lookup` and `reverse_lookup` suspend the routing function and raise Lua errors
+/// on failure. Route DNS upstream requests
 ///
 /// The exposed router context to script can be seen in [`crate::plugin::router::RouteContext`]
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -102,7 +131,25 @@ impl RouterCfg {
         Ok(())
     }
 
-    #[cfg(feature = "plugin")]
+    #[cfg(all(feature = "plugin", feature = "dns-server"))]
+    pub(super) fn build(
+        &self,
+        resolver_manager: Arc<ResolverManager>,
+    ) -> Result<Option<Router>, SError> {
+        self.validate()?;
+        match (self.src.as_deref(), self.path.as_deref()) {
+            (Some(source), None) => Router::from_source_with_manager(source, resolver_manager)
+                .map(Some)
+                .map_err(|error| {
+                    SError::InvalidConfig(format!("failed to load inline router script: {error}"))
+                }),
+            (None, Some(path)) => Router::load_with_manager(path, resolver_manager).map(Some),
+            (None, None) => Ok(None),
+            (Some(_), Some(_)) => unreachable!("validated above"),
+        }
+    }
+
+    #[cfg(all(feature = "plugin", not(feature = "dns-server")))]
     pub(super) fn build(&self) -> Result<Option<Router>, SError> {
         self.validate()?;
         match (self.src.as_deref(), self.path.as_deref()) {

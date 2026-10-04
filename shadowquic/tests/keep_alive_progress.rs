@@ -75,18 +75,21 @@ fn sent_packets(conn: &ShadowQuicConn) -> u64 {
 }
 
 fn client(server_addr: SocketAddr, keep_alive_interval: u32) -> ShadowQuicClient {
-    ShadowQuicClient::new(ShadowQuicClientCfg {
-        addr: server_addr.to_string(),
-        username: "user".into(),
-        password: "password".into(),
-        server_name: "localhost".into(),
-        alpn: vec!["h3".into()],
-        zero_rtt: false,
-        initial_mtu: 1200,
-        congestion_control: CongestionControl::Bbr,
-        keep_alive_interval,
-        ..Default::default()
-    })
+    ShadowQuicClient::new(
+        ShadowQuicClientCfg {
+            addr: server_addr.to_string(),
+            username: "user".into(),
+            password: "password".into(),
+            server_name: "localhost".into(),
+            alpn: vec!["h3".into()],
+            zero_rtt: false,
+            initial_mtu: 1200,
+            congestion_control: CongestionControl::Bbr,
+            keep_alive_interval,
+            ..Default::default()
+        },
+        std::sync::Arc::new(shadowquic::dns::ResolverManager::new()),
+    )
 }
 
 fn server_cfg(server_addr: SocketAddr, upstream_addr: SocketAddr) -> ShadowQuicServerCfg {

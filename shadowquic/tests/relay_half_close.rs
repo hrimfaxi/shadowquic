@@ -104,19 +104,22 @@ async fn proxy_pair(client_grace: u64, server_grace: u64) -> Proxy {
     })
     .await
     .unwrap();
-    let sq_client = ShadowQuicClient::new(ShadowQuicClientCfg {
-        addr: server_addr.to_string(),
-        username: "user".into(),
-        password: "password".into(),
-        server_name: "localhost".into(),
-        alpn: vec!["h3".into()],
-        zero_rtt: false,
-        initial_mtu: 1200,
-        congestion_control: CongestionControl::Bbr,
-        keep_alive_interval: 0,
-        half_close_timeout: client_grace,
-        ..Default::default()
-    });
+    let sq_client = ShadowQuicClient::new(
+        ShadowQuicClientCfg {
+            addr: server_addr.to_string(),
+            username: "user".into(),
+            password: "password".into(),
+            server_name: "localhost".into(),
+            alpn: vec!["h3".into()],
+            zero_rtt: false,
+            initial_mtu: 1200,
+            congestion_control: CongestionControl::Bbr,
+            keep_alive_interval: 0,
+            half_close_timeout: client_grace,
+            ..Default::default()
+        },
+        Arc::new(shadowquic::dns::ResolverManager::new()),
+    );
     tokio::spawn(Manager::single(Box::new(inbound), Arc::new(sq_client)).run());
 
     Proxy {
