@@ -99,6 +99,7 @@ async fn proxy_pair(client_grace: u64, server_grace: u64) -> Proxy {
     let proxy_addr = unused_tcp_addr();
     let inbound = MixedServer::new(MixedServerCfg {
         tag: "test-mixed".into(),
+        default_outbound: None,
         bind_addr: proxy_addr,
         users: vec![],
     })
