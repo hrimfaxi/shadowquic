@@ -10,6 +10,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 fn udp_cfg(upstream: SocketAddr) -> DnsUdpServerCfg {
     DnsUdpServerCfg {
+        bypass_cache: false,
         tag: "dns".into(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         upstream,
@@ -54,10 +55,16 @@ fn run(
     tokio::task::JoinHandle<Result<()>>,
 ) {
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let manager = Manager::single(
+    let tag = server.resolver.tag.clone();
+    let mut manager = Manager::single(
         Box::new(server),
-        Arc::new(DirectOut::new(DirectOutCfg::default())),
+        Arc::new(DirectOut::new(
+            DirectOutCfg::default(),
+            Arc::new(ResolverManager::new()),
+        )),
     );
+    let inbound = manager.inbounds.remove("inbound").unwrap();
+    manager.inbounds.insert(tag, inbound);
     (
         stop,
         tokio::spawn(manager.run_until(async {
@@ -72,6 +79,7 @@ async fn upstream_requests_include_dns_query_context() {
         for ty in [TYPE::A, TYPE::AAAA] {
             let (requests, mut received) = mpsc::channel(1);
             let resolver = Resolver {
+                bypass_cache: false,
                 tag: "dns".into(),
                 backend: Backend::Udp("192.0.2.1:53".parse().unwrap()),
                 requests,
@@ -228,6 +236,71 @@ fn cache_expires_and_ages_ttls() {
 }
 
 #[tokio::test]
+async fn fakeip_bypasses_shared_cache() {
+    let manager = ResolverManager::new();
+    let cache = manager.cache();
+    let fake = Arc::new(FakeIp::default());
+    let resolver = Resolver {
+        bypass_cache: true,
+        tag: "fake".into(),
+        backend: Backend::FakeIp,
+        requests: mpsc::channel(1).0,
+        fake_ip: Some(fake.clone()),
+        cache: cache.clone(),
+    };
+    for ty in [TYPE::A, TYPE::AAAA] {
+        let query = query("isolated.test", ty, 42);
+        let expected = fake.allocate("isolated.test", ty == TYPE::AAAA).unwrap();
+        let reply = resolver.exchange(&query).await.unwrap();
+        assert_eq!(
+            cache::addresses(&Packet::parse(&reply).unwrap()),
+            vec![expected]
+        );
+        assert!(cache.get(&query).unwrap().is_none());
+        assert!(cache.lookup_cache("isolated.test").is_empty());
+        assert!(cache.reverse_lookup_cache(expected).is_none());
+    }
+
+    for ty in [TYPE::A, TYPE::AAAA] {
+        let query = query("cached.test", ty, 43);
+        let real_ip: IpAddr = if ty == TYPE::A {
+            "192.0.2.1".parse().unwrap()
+        } else {
+            "2001:db8::1".parse().unwrap()
+        };
+        let mut reply = reply_for(Packet::parse(&query).unwrap());
+        reply.answers.push(ResourceRecord::new(
+            reply.questions[0].qname.clone(),
+            CLASS::IN,
+            60,
+            match real_ip {
+                IpAddr::V4(ip) => RData::A(ip.into()),
+                IpAddr::V6(ip) => RData::AAAA(ip.into()),
+            },
+        ));
+        cache.insert(&query, reply);
+
+        let expected = fake.allocate("cached.test", ty == TYPE::AAAA).unwrap();
+        let reply = resolver.exchange(&query).await.unwrap();
+        assert_eq!(
+            cache::addresses(&Packet::parse(&reply).unwrap()),
+            vec![expected]
+        );
+        assert!(cache.reverse_lookup_cache(expected).is_none());
+        let real_reply = manager
+            .resolver(DEFAULT_SYSTEM_DNS_TAG)
+            .unwrap()
+            .exchange(&query)
+            .await
+            .unwrap();
+        assert_eq!(
+            cache::addresses(&Packet::parse(&real_reply).unwrap()),
+            vec![real_ip]
+        );
+    }
+}
+
+#[tokio::test]
 async fn fakeip_is_stable_dual_stack_and_restores_ports() {
     let server = DnsFakeIpServerCfg {
         tag: "dns".into(),
@@ -258,6 +331,7 @@ async fn fakeip_is_stable_dual_stack_and_restores_ports() {
 #[tokio::test]
 async fn system_resolves_localhost_and_rejects_unsupported_records() {
     let server = DnsSystemServerCfg {
+        bypass_cache: false,
         tag: "dns".into(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
     }
@@ -420,6 +494,7 @@ async fn tls_exchange(trusted: bool, server_name: &str) -> Result<Vec<u8>> {
     client.jls_config.enable = false;
     let (requests, mut received) = mpsc::channel(1);
     let resolver = Resolver {
+        bypass_cache: false,
         tag: "dns".into(),
         backend: Backend::Tls {
             upstream: "192.0.2.1:853".parse().unwrap(),
@@ -471,6 +546,7 @@ impl Outbound for Capture {
 #[tokio::test]
 async fn selected_resolver_handles_tcp_and_udp_destinations_and_preserves_ports() {
     let server = DnsSystemServerCfg {
+        bypass_cache: false,
         tag: "dns".into(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
     }
@@ -566,6 +642,7 @@ async fn routing_scripts_await_tagged_dns_lookups_and_route_their_upstream_reque
         manager.insert(
             tag.into(),
             Arc::new(Resolver {
+                bypass_cache: false,
                 tag: tag.into(),
                 backend: Backend::Udp(addr.parse().unwrap()),
                 requests: requests.clone(),
@@ -927,6 +1004,7 @@ fn dns_configurations_require_only_their_own_fields() {
 #[tokio::test]
 async fn tls_configuration_rejects_invalid_server_name_before_binding() {
     let config = super::config::DnsTlsServerCfg {
+        bypass_cache: false,
         tag: "tls".into(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         upstream: "127.0.0.1:853".parse().unwrap(),
@@ -1227,6 +1305,7 @@ async fn different_resolvers_share_cached_responses_and_restore_transaction_ids(
 
     let unused_upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let second = super::config::DnsTcpServerCfg {
+        bypass_cache: false,
         tag: "second-resolver".into(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         upstream: unused_upstream.local_addr().unwrap(),
@@ -1252,4 +1331,103 @@ async fn different_resolvers_share_cached_responses_and_restore_transaction_ids(
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn bypass_cache_defaults_to_false_and_is_configurable_except_for_fakeip() {
+    use super::config::DnsCfg;
+
+    for (kind, fields) in [
+        ("dns-udp", ", upstream: '127.0.0.1:53'"),
+        ("dns-tcp", ", upstream: '127.0.0.1:53'"),
+        (
+            "dns-tls",
+            ", upstream: '127.0.0.1:853', server-name: dns.test",
+        ),
+        ("dns-system", ""),
+    ] {
+        for (option, expected) in [
+            ("", false),
+            (", bypass-cache: false", false),
+            (", bypass-cache: true", true),
+        ] {
+            let config: DnsCfg = serde_saphyr::from_str(&format!(
+                "{{tag: dns, type: {kind}, bind-addr: '127.0.0.1:0'{fields}{option}}}"
+            ))
+            .unwrap();
+            let server = config.build().await.unwrap();
+            assert_eq!(server.resolver.bypass_cache, expected, "{kind}{option}");
+        }
+    }
+    for value in [false, true] {
+        assert!(
+            serde_saphyr::from_str::<DnsCfg>(&format!(
+                "{{tag: dns, type: dns-fakeip, bind-addr: '127.0.0.1:0', bypass-cache: {value}}}"
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn bypass_cache_skips_reads_and_writes_without_changing_shared_entries() {
+    let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let cache = Arc::new(DnsCache::default());
+    let cached_query = query("cached-bypass.test", TYPE::A, 1);
+    let mut cached_reply = reply_for(Packet::parse(&cached_query).unwrap());
+    let cached_ip = Ipv4Addr::new(192, 0, 2, 7);
+    cached_reply.answers.push(ResourceRecord::new(
+        cached_reply.questions[0].qname.clone(),
+        CLASS::IN,
+        60,
+        RData::A(cached_ip.into()),
+    ));
+    cache.insert(&cached_query, cached_reply);
+    let mut config = udp_cfg(upstream.local_addr().unwrap());
+    config.bypass_cache = true;
+    let server = config.build_with_cache(cache.clone()).await.unwrap();
+    let addr = server.local_addr;
+    let (stop, task) = run(server);
+    let mock = tokio::spawn(async move {
+        let mut buffer = vec![0; 2000];
+        for _ in 0..4 {
+            let (len, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+            upstream
+                .send_to(&response(&buffer[..len], 60), peer)
+                .await
+                .unwrap();
+        }
+    });
+    for name in ["cached-bypass.test", "uncached-bypass.test"] {
+        for id in [123, 456] {
+            let bytes = exchange_udp(addr, &query(name, TYPE::A, id)).await;
+            let reply = Packet::parse(&bytes).unwrap();
+            assert_eq!(reply.id(), id);
+            assert_eq!(
+                cache::addresses(&reply),
+                vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
+            );
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(3), mock)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cache.lookup_cache("cached-bypass.test"),
+        vec![IpAddr::V4(cached_ip)]
+    );
+    assert!(
+        cache
+            .get(&query("uncached-bypass.test", TYPE::A, 1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        cache
+            .reverse_lookup_cache(Ipv4Addr::LOCALHOST.into())
+            .is_none()
+    );
+    stop.send(()).unwrap();
+    task.await.unwrap().unwrap();
 }

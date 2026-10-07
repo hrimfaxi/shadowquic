@@ -47,6 +47,18 @@ pub enum ProxyRequest<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend> {
 }
 
 impl ProxyRequest {
+    pub fn user_context(&self) -> &UserContext {
+        match self {
+            ProxyRequest::Tcp(TcpSession { user_context, .. }) => user_context,
+            ProxyRequest::Udp(UdpSession { user_context, .. }) => user_context,
+        }
+    }
+    pub fn user_context_mut(&mut self) -> &mut UserContext {
+        match self {
+            ProxyRequest::Tcp(TcpSession { user_context, .. }) => user_context,
+            ProxyRequest::Udp(UdpSession { user_context, .. }) => user_context,
+        }
+    }
     pub fn dst(&self) -> &SocksAddr {
         match self {
             ProxyRequest::Tcp(TcpSession { dst, .. }) => dst,
@@ -58,21 +70,6 @@ impl ProxyRequest {
         match self {
             ProxyRequest::Tcp(session) => session.dst = dst,
             ProxyRequest::Udp(session) => session.dst = dst,
-        }
-    }
-
-    pub(crate) fn set_inbound_tag(&mut self, tag: String) {
-        match self {
-            ProxyRequest::Tcp(session) => session.user_context.inbound_tag = tag,
-            ProxyRequest::Udp(session) => session.user_context.inbound_tag = tag,
-        }
-    }
-
-    /// Tag of the inbound that accepted this request.
-    pub fn inbound_tag(&self) -> &str {
-        match self {
-            ProxyRequest::Tcp(session) => &session.user_context.inbound_tag,
-            ProxyRequest::Udp(session) => &session.user_context.inbound_tag,
         }
     }
 }
@@ -177,6 +174,10 @@ pub struct DnsQuery {
 pub struct UserContext {
     pub src_addr: Option<SocketAddr>,
     pub inbound_tag: String,
+    /// Outbound preference stamped by the accepting inbound on every request.
+    /// A router script may honor or override it; without one it selects the
+    /// outbound, and `None` falls back to the global default.
+    pub preferred_outbound: Option<String>,
     pub dns_query: Vec<DnsQuery>,
     pub stats: Option<StatsContext>,
 }
@@ -205,6 +206,7 @@ impl TcpTrait for TcpStream {
 
 #[async_trait]
 pub trait Inbound<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend>: Send + Sync + Unpin {
+    /// Return a request with its inbound tag and routing preference populated.
     async fn accept(&mut self) -> Result<ProxyRequest<T, I, O>, SError>;
     async fn init(&self) -> Result<(), SError> {
         Ok(())
@@ -244,10 +246,8 @@ pub struct Manager {
     pub inbounds: HashMap<String, Box<dyn Inbound>>,
     pub outbounds: HashMap<String, Arc<dyn Outbound>>,
     /// Fallback outbound tag, used when no router script is configured and the
-    /// request's inbound has no `default-outbound` of its own.
+    /// request carries no `preferred_outbound` from its inbound.
     pub default_outbound: String,
-    /// Per-inbound outbound tag applied when no router script is configured.
-    pub inbound_defaults: HashMap<String, String>,
     #[cfg(feature = "plugin")]
     pub router: Option<Arc<plugin::router::Router>>,
 
@@ -259,7 +259,6 @@ pub struct Manager {
 struct RequestDispatcher {
     outbounds: HashMap<String, Arc<dyn Outbound>>,
     default_outbound: String,
-    inbound_defaults: HashMap<String, String>,
     #[cfg(feature = "plugin")]
     router: Option<Arc<plugin::router::Router>>,
 }
@@ -293,10 +292,10 @@ impl RequestDispatcher {
                     }
                 }
             }
-            None => self.inbound_default_tag(&req),
+            None => self.fallback_outbound_tag(&req),
         };
         #[cfg(not(feature = "plugin"))]
-        let outbound_tag = self.inbound_default_tag(&req);
+        let outbound_tag = self.fallback_outbound_tag(&req);
         let Some(outbound) = self.outbounds.get(&outbound_tag).cloned() else {
             error!(outbound = %outbound_tag, "selected an unknown outbound");
             return;
@@ -311,13 +310,14 @@ impl RequestDispatcher {
         }
     }
 
-    /// Outbound for a request with no router script: the inbound's own
-    /// `default-outbound`, else the global default.
-    fn inbound_default_tag(&self, req: &ProxyRequest) -> String {
-        self.inbound_defaults
-            .get(req.inbound_tag())
-            .cloned()
-            .unwrap_or_else(|| self.default_outbound.clone())
+    /// Outbound for a request with no router script: the inbound's preferred
+    /// outbound, else the global default.
+    fn fallback_outbound_tag(&self, req: &ProxyRequest) -> String {
+        req.user_context()
+            .preferred_outbound
+            .as_deref()
+            .unwrap_or(self.default_outbound.as_str())
+            .to_owned()
     }
 }
 
@@ -346,7 +346,6 @@ impl Manager {
             inbounds: HashMap::from([("inbound".into(), inbound)]),
             outbounds: HashMap::from([("outbound".into(), outbound)]),
             default_outbound: "outbound".into(),
-            inbound_defaults: HashMap::new(),
             #[cfg(feature = "plugin")]
             router: None,
             #[cfg(feature = "dns-server")]
@@ -375,7 +374,6 @@ impl Manager {
         let dispatcher = Arc::new(RequestDispatcher {
             outbounds: self.outbounds,
             default_outbound: self.default_outbound,
-            inbound_defaults: self.inbound_defaults,
             #[cfg(feature = "plugin")]
             router: self.router,
         });
@@ -411,8 +409,11 @@ impl Manager {
                         }
                     };
                     match req {
-                        Ok(mut req) => {
-                            req.set_inbound_tag(tag.clone());
+                        Ok(req) => {
+                            assert!(req.user_context().inbound_tag == tag);
+                            let span = tracing::Span::current();
+                            let _ = req.user_context().src_addr.map(|a| span.record("src", tracing::field::display(a)));
+                            let _ = req.user_context().stats.as_ref().map(|a| span.record("user", tracing::field::display(&a.username)));
                             let dispatcher = dispatcher.clone();
                             requests.spawn(async move {
                                 dispatcher.dispatch(req).await;

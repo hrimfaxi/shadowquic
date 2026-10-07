@@ -172,14 +172,17 @@ async fn spawn_socks_server() {
     trace!("Running");
 
     let socks_server = SocksServer::new(SocksServerCfg {
-        tag: String::new(),
+        tag: "inbound".into(),
         default_outbound: None,
         bind_addr: "127.0.0.1:1089".parse().unwrap(),
         users: vec![],
     })
     .await
     .unwrap();
-    let direct_client = DirectOut::new(DirectOutCfg::default());
+    let direct_client = DirectOut::new(
+        DirectOutCfg::default(),
+        std::sync::Arc::new(shadowquic::dns::ResolverManager::new()),
+    );
     let server = Manager::single(Box::new(socks_server), std::sync::Arc::new(direct_client));
     tokio::spawn(server.run());
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -240,7 +243,7 @@ async fn shadowquic_client_server(over_stream: bool, port: u16) {
     trace!("Running");
 
     let socks_server = SocksServer::new(SocksServerCfg {
-        tag: String::new(),
+        tag: "inbound".into(),
         default_outbound: None,
         bind_addr: SocketAddr::new("127.0.0.1".parse().unwrap(), port),
         users: vec![],
@@ -266,6 +269,7 @@ async fn shadowquic_client_server(over_stream: bool, port: u16) {
     let client = Manager::single(Box::new(socks_server), std::sync::Arc::new(sq_client));
 
     let sq_server = ShadowQuicServer::new(ShadowQuicServerCfg {
+        tag: "inbound".into(),
         bind_addr: format!("127.0.0.1:{}", port + 10).parse().unwrap(),
         users: vec![AuthUser {
             username: "123".into(),
@@ -283,7 +287,10 @@ async fn shadowquic_client_server(over_stream: bool, port: u16) {
     })
     .await
     .unwrap();
-    let direct_client = DirectOut::new(DirectOutCfg::default());
+    let direct_client = DirectOut::new(
+        DirectOutCfg::default(),
+        std::sync::Arc::new(shadowquic::dns::ResolverManager::new()),
+    );
     let server = Manager::single(Box::new(sq_server), std::sync::Arc::new(direct_client));
 
     tokio::spawn(server.run());

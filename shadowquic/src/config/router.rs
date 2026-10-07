@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-#[cfg(all(feature = "plugin", feature = "dns-server"))]
+#[cfg(feature = "plugin")]
 use crate::dns::ResolverManager;
 use crate::error::SError;
 #[cfg(feature = "plugin")]
 use crate::plugin::router::Router;
-#[cfg(all(feature = "plugin", feature = "dns-server"))]
+#[cfg(feature = "plugin")]
 use std::sync::Arc;
 
 /// Request routing through a default outbound or a restricted Lua script.
@@ -93,11 +93,21 @@ use std::sync::Arc;
 /// | `reverse_lookup(dns_tag, ip)` | Returns an array of PTR hostname strings and may block router| Inside the returned routing function; requires `dns-server` |
 /// | `lookup_cache(domain)` | Returns an array of cached IP strings, or an empty array on a miss; domain names are case insensitive | Script loading and routing; requires `dns-server` |
 /// | `reverse_lookup_cache(ip)` | Returns the most recently cached hostname from matching A/AAAA or PTR answers, or nil on a miss; invalid IP strings raise a Lua error | Script loading and routing; requires `dns-server` |
+/// | `find_ip_v4(tag, list, ip)` | Returns whether an IPv4 address belongs to a country list in the tagged database | Script loading and routing; requires `router-db` |
+/// | `find_ip_v6(tag, list, ip)` | Returns whether an IPv6 address belongs to a country list in the tagged database | Script loading and routing; requires `router-db` |
+/// | `find_domain(tag, list, domain)` | Returns whether a domain matches a Geosite list in the tagged database | Script loading and routing; requires `router-db` |
 ///
 /// Cache lookups use the shared DNS cache, ignore expired entries, and perform
 /// no network I/O or asynchronous suspension. They do not take a DNS service tag.
 /// `lookup` and `reverse_lookup` suspend the routing function and raise Lua errors
 /// on failure. Route DNS upstream requests
+///
+/// Database membership helpers require `router.database` entries (see
+/// [`super::RouterDatabaseCfg`]). All three helpers return booleans.
+/// Missing databases download through an internal inbound with the database tag.
+/// Route that traffic before calling helpers. Unavailable databases raise Lua
+/// errors; use `pcall` for an explicit fallback while downloading. Existing redb
+/// files are reused, including across script reloads.
 ///
 /// The exposed router context to script can be seen in [`crate::plugin::router::RouteContext`]
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -107,6 +117,9 @@ pub struct RouterCfg {
     /// first configured outbound. Does not require the `plugin` feature.
     #[serde(default)]
     pub default_outbound: Option<String>,
+    /// Persistent databases available to Lua membership helpers.
+    #[serde(default)]
+    pub database: Vec<super::RouterDatabaseCfg>,
     /// Inline Lua source returning a routing function. Mutually exclusive with `path`.
     #[serde(default)]
     pub src: Option<String>,
@@ -122,43 +135,78 @@ impl RouterCfg {
                 "configure either `router.src` or `router.path`, not both".into(),
             ));
         }
+        #[cfg(not(feature = "router-db"))]
+        if !self.database.is_empty() {
+            return Err(SError::InvalidConfig(
+                "router.database requires building with the `router-db` feature".into(),
+            ));
+        }
         #[cfg(not(feature = "plugin"))]
-        if self.src.is_some() || self.path.is_some() {
+        if self.src.is_some() || self.path.is_some() || !self.database.is_empty() {
             return Err(SError::InvalidConfig(
                 "router config requires building with the `plugin` feature".into(),
             ));
         }
+        let mut paths = std::collections::HashSet::new();
+        for db in &self.database {
+            if db.path().as_os_str().is_empty() || !paths.insert(db.path()) {
+                return Err(SError::InvalidConfig(
+                    "router database paths must be nonempty and unique".into(),
+                ));
+            }
+            #[cfg(feature = "router-db")]
+            crate::plugin::database::validate_url(db.url())?;
+        }
         Ok(())
     }
 
-    #[cfg(all(feature = "plugin", feature = "dns-server"))]
+    #[cfg(feature = "plugin")]
     pub(super) fn build(
         &self,
         resolver_manager: Arc<ResolverManager>,
+        #[cfg(feature = "router-db")] databases: Arc<crate::plugin::database::Databases>,
     ) -> Result<Option<Router>, SError> {
         self.validate()?;
         match (self.src.as_deref(), self.path.as_deref()) {
-            (Some(source), None) => Router::from_source_with_manager(source, resolver_manager)
-                .map(Some)
-                .map_err(|error| {
-                    SError::InvalidConfig(format!("failed to load inline router script: {error}"))
-                }),
-            (None, Some(path)) => Router::load_with_manager(path, resolver_manager).map(Some),
+            (Some(source), None) => Router::from_source_with_databases(
+                source,
+                resolver_manager,
+                #[cfg(feature = "router-db")]
+                databases,
+            )
+            .map(Some)
+            .map_err(|error| {
+                SError::InvalidConfig(format!("failed to load inline router script: {error}"))
+            }),
+            (None, Some(path)) => Router::load_with_databases(
+                path,
+                resolver_manager,
+                #[cfg(feature = "router-db")]
+                databases,
+            )
+            .map(Some),
             (None, None) => Ok(None),
             (Some(_), Some(_)) => unreachable!("validated above"),
         }
     }
+}
 
-    #[cfg(all(feature = "plugin", not(feature = "dns-server")))]
-    pub(super) fn build(&self) -> Result<Option<Router>, SError> {
-        self.validate()?;
-        match (self.src.as_deref(), self.path.as_deref()) {
-            (Some(source), None) => Router::from_source(source).map(Some).map_err(|error| {
-                SError::InvalidConfig(format!("failed to load inline router script: {error}"))
-            }),
-            (None, Some(path)) => Router::load(path).map(Some),
-            (None, None) => Ok(None),
-            (Some(_), Some(_)) => unreachable!("validated above"),
-        }
+#[cfg(all(test, not(feature = "router-db")))]
+mod tests {
+    use super::RouterCfg;
+
+    #[test]
+    fn database_configuration_requires_router_db_feature() {
+        let config: RouterCfg = serde_saphyr::from_str(
+            "database:\n  - type: country\n    tag: country\n    path: country.redb\n",
+        )
+        .unwrap();
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("router-db")
+        );
     }
 }

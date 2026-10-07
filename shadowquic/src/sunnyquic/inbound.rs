@@ -282,11 +282,17 @@ impl SunnyQuicServer {
 #[async_trait]
 impl Inbound for SunnyQuicServer {
     async fn accept(&mut self) -> Result<crate::ProxyRequest, SError> {
-        let req = self
+        let mut req = self
             .request
             .recv()
             .await
             .ok_or(SError::InboundUnavailable)?;
+        {
+            let config = self.user_manager.config.read().await;
+            let context = req.user_context_mut();
+            context.inbound_tag = config.tag.clone();
+            context.preferred_outbound = config.default_outbound.clone();
+        }
         Ok(self.observer.wrap_request(req).await)
     }
     /// Init background job for accepting connection

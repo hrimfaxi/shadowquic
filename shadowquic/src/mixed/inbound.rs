@@ -68,11 +68,13 @@ async fn handle_connection(
 #[async_trait]
 impl Inbound for MixedServer {
     async fn accept(&mut self) -> Result<ProxyRequest, SError> {
-        let recv = self
+        let mut recv = self
             .request_receiver
             .recv()
             .await
             .ok_or(SError::InboundUnavailable)?;
+        recv.user_context_mut().inbound_tag = self.cfg.tag.clone();
+        recv.user_context_mut().preferred_outbound = self.cfg.default_outbound.clone();
         Ok(recv)
     }
 

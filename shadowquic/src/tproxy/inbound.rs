@@ -94,11 +94,11 @@ impl TproxyServer {
 impl Inbound for TproxyServer {
     async fn accept(&mut self) -> Result<ProxyRequest, SError> {
         let tag = self.cfg.tag.clone();
-        tokio::select! {
+        let mut req: ProxyRequest = tokio::select! {
             (stream, addr) = async {
                 loop {
                     match self.tcp_listener.accept().await {
-                        Ok(connection) => return connection,
+                        Ok((conn, addr)) => return (conn, addr.to_canonical()),
                         Err(error) => {
                             tracing::error!(%error, "failed to accept tproxy tcp connection");
                             // Keep UDP requests available while TCP accepts back off.
@@ -111,17 +111,12 @@ impl Inbound for TproxyServer {
                 // other two inbounds there is no measured handshake delay to fix
                 // here; this only keeps every accepted socket behaving the same.
                 let _ = stream.set_nodelay(true);
-                let span = tracing::info_span!("inbound",
-                    tag = %tag,
-                    src = %addr,
-                    user = tracing::field::Empty,
-                    id = tracing::field::Empty,
-                );
-                span.in_scope(|| {
-                    tracing::info!("accepted tproxy tcp connection");
-                });
+
+                tracing::info!("accepted tproxy tcp connection");
+
                 let src_addr = Some(addr);
-                let orig_dst = stream.local_addr().map_err(|e| SError::SocksError(e.to_string()))?;
+                let orig_dst = stream.local_addr().map_err(|e| SError::SocksError(e.to_string()))?
+                .to_canonical();
                 let dst = SocksAddr {
                     addr: match orig_dst.ip() {
                         std::net::IpAddr::V4(v4) => AddrOrDomain::V4(v4.octets()),
@@ -129,12 +124,12 @@ impl Inbound for TproxyServer {
                     },
                     port: orig_dst.port(),
                 };
-                Ok(ProxyRequest::Tcp(TcpSession {
+                ProxyRequest::Tcp(TcpSession {
                     stream: Box::new(stream),
                     dst,
                     src_addr,
                     user_context: Default::default(),
-                }))
+                })
             }
             Some(req) = self.udp_req_rx.recv() => {
                 let span = tracing::info_span!("inbound",
@@ -150,9 +145,12 @@ impl Inbound for TproxyServer {
                 span.in_scope(|| {
                     tracing::info!("accepted tproxy udp request");
                 });
-                Ok(req)
+                req
             }
-        }
+        };
+        req.user_context_mut().inbound_tag = self.cfg.tag.clone();
+        req.user_context_mut().preferred_outbound = self.cfg.default_outbound.clone();
+        Ok(req)
     }
 }
 

@@ -17,6 +17,7 @@ use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
 #[ignore = "requires Internet access to AliDNS over TCP port 853"]
 async fn resolves_through_alidns_over_tls() -> Result<(), Box<dyn Error>> {
     let server = DnsTlsServerCfg {
+        bypass_cache: false,
         tag: "alidns".into(),
         bind_addr: "127.0.0.1:0".parse()?,
         upstream: "223.5.5.5:853".parse()?,
@@ -25,10 +26,15 @@ async fn resolves_through_alidns_over_tls() -> Result<(), Box<dyn Error>> {
     .build()
     .await?;
     let local_addr = server.local_addr;
-    let manager = Manager::single(
+    let mut manager = Manager::single(
         Box::new(server),
-        Arc::new(DirectOut::new(DirectOutCfg::default())),
+        Arc::new(DirectOut::new(
+            DirectOutCfg::default(),
+            std::sync::Arc::new(shadowquic::dns::ResolverManager::new()),
+        )),
     );
+    let inbound = manager.inbounds.remove("inbound").unwrap();
+    manager.inbounds.insert("alidns".into(), inbound);
     assert_alidns_query(manager, local_addr, "www.aliyun.com").await
 }
 

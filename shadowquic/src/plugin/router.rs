@@ -11,6 +11,8 @@ use tracing::{info, info_span, warn};
 
 use mlua::{Function, Lua, LuaOptions, StdLib, UserData, UserDataFields, chunk::ChunkMode};
 
+#[cfg(feature = "router-db")]
+use super::database::Databases;
 use crate::dns::ResolverManager;
 use crate::{
     DnsQuery, ProxyRequest, StatsContext, TcpSession, UdpSession,
@@ -42,6 +44,9 @@ pub struct RouteContext {
     pub src_ip_v6: Option<Ipv6Addr>,
     pub src_port: Option<u16>,
     pub inbound_tag: String,
+    /// Outbound the accepting inbound prefers; a routing hint the script may
+    /// honor or override. `None` means no preference was declared.
+    pub preferred_outbound: Option<String>,
     /// DNS questions attached to the request; empty for requests without DNS metadata.
     pub dns_query: Vec<DnsQuery>,
     /// Only valid for shadowquic/sunnyquic inbound requests.
@@ -52,6 +57,9 @@ pub struct RouteContext {
 impl UserData for RouteContext {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("inbound_tag", |_, this| Ok(this.inbound_tag.clone()));
+        fields.add_field_method_get("preferred_outbound", |_, this| {
+            Ok(this.preferred_outbound.clone())
+        });
         fields.add_field_method_get("dns_query", |lua, this| {
             let queries = lua.create_table()?;
             for (index, query) in this.dns_query.iter().enumerate() {
@@ -157,6 +165,7 @@ impl RouteContext {
                 dst,
                 *src_addr,
                 &user_context.inbound_tag,
+                user_context.preferred_outbound.clone(),
                 NetworkType::Tcp,
                 user_context.stats.clone(),
                 &user_context.dns_query,
@@ -170,6 +179,7 @@ impl RouteContext {
                 dst,
                 *src_addr,
                 &user_context.inbound_tag,
+                user_context.preferred_outbound.clone(),
                 NetworkType::Udp,
                 user_context.stats.clone(),
                 &user_context.dns_query,
@@ -181,6 +191,7 @@ impl RouteContext {
         dst: &SocksAddr,
         src_addr: Option<SocketAddr>,
         inbound_tag: &str,
+        preferred_outbound: Option<String>,
         network_type: NetworkType,
         stats_context: Option<StatsContext>,
         dns_query: &[DnsQuery],
@@ -212,6 +223,7 @@ impl RouteContext {
             src_port: src_addr.map(|addr| addr.port()),
             src_addr,
             inbound_tag: inbound_tag.to_owned(),
+            preferred_outbound,
             dns_query: dns_query.to_vec(),
             stats_context,
             network_type,
@@ -229,6 +241,8 @@ pub struct Router {
 }
 
 struct RouterInner {
+    #[cfg(feature = "router-db")]
+    databases: Arc<Databases>,
     source: String,
     lua: Lua,
     route: Function,
@@ -237,26 +251,33 @@ struct RouterInner {
 impl Router {
     /// Load a script and watch its parent directory, including atomic file replacements.
     pub fn load(path: &Path) -> Result<Self, SError> {
-        Self::load_inner(path, Arc::new(ResolverManager::new()))
+        Self::load_with_databases(
+            path,
+            Arc::new(ResolverManager::new()),
+            #[cfg(feature = "router-db")]
+            Arc::default(),
+        )
     }
 
-    pub(crate) fn load_with_manager(
+    pub(crate) fn load_with_databases(
         path: &Path,
         resolver_manager: Arc<ResolverManager>,
+        #[cfg(feature = "router-db")] databases: Arc<Databases>,
     ) -> Result<Self, SError> {
-        Self::load_inner(path, resolver_manager)
-    }
-
-    fn load_inner(path: &Path, resolver_manager: Arc<ResolverManager>) -> Result<Self, SError> {
         let path = watched_script_path(path)?;
         let script = read_script(&path)?;
-        let mut router =
-            Self::from_source_inner(&script, resolver_manager.clone()).map_err(|error| {
-                SError::InvalidConfig(format!(
-                    "failed to load router script {}: {error}",
-                    path.display()
-                ))
-            })?;
+        let mut router = Self::from_source_with_databases(
+            &script,
+            resolver_manager.clone(),
+            #[cfg(feature = "router-db")]
+            databases,
+        )
+        .map_err(|error| {
+            SError::InvalidConfig(format!(
+                "failed to load router script {}: {error}",
+                path.display()
+            ))
+        })?;
         let inner = Arc::downgrade(&router.inner);
         let watched_path = path.clone();
         let span = info_span!("router", path = %path.display());
@@ -301,33 +322,52 @@ impl Router {
         Ok(router)
     }
 
-    #[cfg(any(test, not(feature = "dns-server")))]
+    #[cfg(test)]
     pub(crate) fn from_source(source: &str) -> mlua::Result<Self> {
-        Self::from_source_inner(source, Arc::new(ResolverManager::new()))
+        Self::from_source_with_databases(
+            source,
+            Arc::new(ResolverManager::new()),
+            #[cfg(feature = "router-db")]
+            Arc::default(),
+        )
     }
 
-    #[cfg(feature = "dns-server")]
+    #[cfg(all(test, feature = "dns-server"))]
     pub(crate) fn from_source_with_manager(
         source: &str,
         resolver_manager: Arc<ResolverManager>,
     ) -> mlua::Result<Self> {
-        Self::from_source_inner(source, resolver_manager)
+        Self::from_source_with_databases(
+            source,
+            resolver_manager,
+            #[cfg(feature = "router-db")]
+            Arc::default(),
+        )
     }
 
-    fn from_source_inner(
+    pub(crate) fn from_source_with_databases(
         source: &str,
         resolver_manager: Arc<ResolverManager>,
+        #[cfg(feature = "router-db")] databases: Arc<Databases>,
     ) -> mlua::Result<Self> {
         Ok(Self {
             _watcher: None,
-            inner: Arc::new(Mutex::new(Self::compile_inner(source, resolver_manager)?)),
+            inner: Arc::new(Mutex::new(Self::compile_inner(
+                source,
+                resolver_manager,
+                #[cfg(feature = "router-db")]
+                databases,
+            )?)),
         })
     }
 
     fn compile_inner(
         source: &str,
         resolver_manager: Arc<ResolverManager>,
+        #[cfg(feature = "router-db")] databases: Arc<Databases>,
     ) -> mlua::Result<RouterInner> {
+        #[cfg(not(feature = "dns-server"))]
+        let _ = resolver_manager;
         let libs = StdLib::STRING | StdLib::TABLE | StdLib::MATH;
         let libs = libs | StdLib::BIT;
         let lua = Lua::new_with(libs, LuaOptions::default())?;
@@ -391,10 +431,21 @@ impl Router {
                 })?,
             )?;
         }
-        Self::compile_common(source, lua)
+        #[cfg(feature = "router-db")]
+        databases.install(&lua)?;
+        Self::compile_common(
+            source,
+            lua,
+            #[cfg(feature = "router-db")]
+            databases,
+        )
     }
 
-    fn compile_common(source: &str, lua: Lua) -> mlua::Result<RouterInner> {
+    fn compile_common(
+        source: &str,
+        lua: Lua,
+        #[cfg(feature = "router-db")] databases: Arc<Databases>,
+    ) -> mlua::Result<RouterInner> {
         // The base library is always loaded, including file and code loaders.
         // Remove these before evaluating any user-provided source.
         let globals = lua.globals();
@@ -418,6 +469,8 @@ impl Router {
             .set_mode(ChunkMode::Text)
             .eval::<Function>()?;
         Ok(RouterInner {
+            #[cfg(feature = "router-db")]
+            databases,
             source: source.to_owned(),
             lua,
             route,
@@ -509,8 +562,13 @@ fn reload_script(inner: &Mutex<RouterInner>, path: &Path, resolver_manager: Arc<
         if source == inner.source {
             return Ok(false);
         }
-        let replacement = Router::compile_inner(&source, resolver_manager)
-            .map_err(|error| SError::RouterError(error.to_string()))?;
+        let replacement = Router::compile_inner(
+            &source,
+            resolver_manager,
+            #[cfg(feature = "router-db")]
+            inner.databases.clone(),
+        )
+        .map_err(|error| SError::RouterError(error.to_string()))?;
         *inner = replacement;
         Ok::<_, SError>(true)
     })();
@@ -683,6 +741,7 @@ mod tests {
             src_ip_v6: None,
             src_port: Some(54321),
             inbound_tag: "socks-in".into(),
+            preferred_outbound: None,
             dns_query: Vec::new(),
             stats_context: None,
             network_type: NetworkType::Tcp,
@@ -847,6 +906,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_context_copies_preferred_outbound_from_tcp_and_udp_requests() {
+        let (stream, _peer) = tokio::io::duplex(64);
+        let (send, recv) = tokio::sync::mpsc::channel(1);
+        let dst: SocksAddr = "192.0.2.53:53".parse::<SocketAddr>().unwrap().into();
+        let user_context = crate::UserContext {
+            preferred_outbound: Some("proxy-a".into()),
+            ..Default::default()
+        };
+        let requests: [ProxyRequest; 2] = [
+            ProxyRequest::Tcp(TcpSession {
+                stream: Box::new(stream) as crate::AnyTcp,
+                dst: dst.clone(),
+                src_addr: None,
+                user_context: user_context.clone(),
+            }),
+            ProxyRequest::Udp(UdpSession {
+                recv: Box::new(recv),
+                send: Arc::new(send),
+                stream: None,
+                bind_addr: dst.clone(),
+                dst,
+                src_addr: None,
+                user_context,
+            }),
+        ];
+        for request in &requests {
+            assert_eq!(
+                RouteContext::from_request(request)
+                    .preferred_outbound
+                    .as_deref(),
+                Some("proxy-a")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lua_router_receives_the_inbound_preferred_outbound() {
+        let router = Router::from_source(
+            r#"
+                return function(ctx)
+                    if ctx.preferred_outbound == "proxy-a" then
+                        return "proxy-a"
+                    end
+                    return "direct"
+                end
+            "#,
+        )
+        .unwrap();
+
+        let mut context = context();
+        context.preferred_outbound = Some("proxy-a".into());
+        assert_eq!(router.route(&mut context).await.unwrap(), "proxy-a");
+        context.preferred_outbound = None;
+        assert_eq!(router.route(&mut context).await.unwrap(), "direct");
+    }
+
+    #[tokio::test]
     async fn lua_router_receives_context_and_returns_outbound_tag() {
         let router = Router::from_source(
             r#"
@@ -994,6 +1110,42 @@ mod tests {
                 .unwrap(),
             "old"
         );
+    }
+
+    #[cfg(not(feature = "router-db"))]
+    #[tokio::test]
+    async fn database_helpers_are_absent_without_router_db() {
+        let router = Router::from_source(
+            r#"assert(find_domain == nil and find_ip_v4 == nil and find_ip_v6 == nil)
+               return function(_) return "direct" end"#,
+        )
+        .unwrap();
+        assert_eq!(router.route(&mut context()).await.unwrap(), "direct");
+    }
+
+    #[cfg(feature = "router-db")]
+    #[tokio::test]
+    async fn database_helpers_remain_available_after_script_reload() {
+        use crate::config::{GeositeDbCfg, RouterDatabaseCfg};
+        use crate::plugin::database::RedbDatabase;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RouterDatabaseCfg::Geosite(GeositeDbCfg {
+            tag: "site".into(),
+            url: "https://example.test/db".into(),
+            path: dir.path().join("site.redb"),
+        });
+        let source = dir.path().join("source.yml");
+        std::fs::write(&source, "lists: [{name: test, rules: ['domain:example']}] ").unwrap();
+        drop(RedbDatabase::import(&cfg, &source).unwrap());
+        let databases = Databases::build(&[cfg], &mut Default::default()).unwrap();
+        let resolver = Arc::new(ResolverManager::new());
+        let path = dir.path().join("router.lua");
+        std::fs::write(&path, "assert(find_domain('site', 'test', 'api.example')); return function(ctx) return 'old' end").unwrap();
+        let router = Router::load_with_databases(&path, resolver.clone(), databases).unwrap();
+        assert_eq!(router.route(&mut context()).await.unwrap(), "old");
+        std::fs::write(&path, "return function(ctx) if find_domain('site', 'test', ctx.dst_domain) then return 'new' end end").unwrap();
+        reload_script(&router.inner, &path, resolver);
+        assert_eq!(router.route(&mut context()).await.unwrap(), "new");
     }
 
     #[tokio::test]
