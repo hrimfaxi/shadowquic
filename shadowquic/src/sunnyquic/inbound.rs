@@ -260,7 +260,7 @@ impl SunnyQuicServer {
         );
         span.record("id", sq_conn.inner.peer_id());
         span.in_scope(|| {
-            tracing::info!("accepted sunnyquic connection");
+            tracing::debug!("accepted sunnyquic connection");
         });
         let sq_conn = Arc::new(sq_conn);
         sq_conn

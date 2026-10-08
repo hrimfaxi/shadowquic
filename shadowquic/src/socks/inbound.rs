@@ -301,7 +301,7 @@ impl Inbound for SocksServer {
                 // ~0.4ms with it.
                 let _ = stream.set_nodelay(true);
                 span.in_scope(|| {
-                    tracing::info!("accepted socks connection");
+                    tracing::debug!("accepted socks connection");
                 });
 
                 let users = users.clone();

@@ -140,7 +140,7 @@ impl Inbound for MixedServer {
                     id = tracing::field::Empty,
                 );
                 span.in_scope(|| {
-                    tracing::info!("accepted mixed connection");
+                    tracing::debug!("accepted mixed connection");
                 });
                 let http = http.clone();
                 let users = users.clone();

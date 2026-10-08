@@ -112,7 +112,7 @@ impl Inbound for TproxyServer {
                 // here; this only keeps every accepted socket behaving the same.
                 let _ = stream.set_nodelay(true);
 
-                tracing::info!("accepted tproxy tcp connection");
+                tracing::debug!("accepted tproxy tcp connection");
 
                 let src_addr = Some(addr);
                 let orig_dst = stream.local_addr().map_err(|e| SError::SocksError(e.to_string()))?

@@ -250,7 +250,7 @@ impl ShadowQuicServer {
         span.record("id", sq_conn.inner.peer_id());
         span.record("user", tracing::field::display(user));
         span.in_scope(|| {
-            tracing::info!("accepted shadowquic connection");
+            tracing::debug!("accepted shadowquic connection");
         });
         let sq_conn = Arc::new(sq_conn);
         sq_conn
