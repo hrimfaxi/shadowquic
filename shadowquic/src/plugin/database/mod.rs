@@ -1,5 +1,5 @@
-//! Disk-backed routing membership databases. Only redb's bounded page cache is
-//! retained after import; source records are never retained by the router.
+//! Routing membership databases: memory-mapped MMDB country lookups or
+//! indexed redb lookups with a bounded page cache.
 mod download;
 #[cfg(test)]
 mod tests;
@@ -14,6 +14,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    io::Read,
     net::IpAddr,
     path::Path,
     sync::{Arc, RwLock},
@@ -59,6 +60,74 @@ where
 pub trait RouterDB: Send + Sync {
     fn find_ip(&self, list: &str, ip: IpAddr) -> Result<bool>;
     fn find_domain(&self, list: &str, domain: &str) -> Result<bool>;
+}
+
+/// Country membership using a read-only mapping of the original MMDB file.
+pub struct MmdbDatabase {
+    reader: maxminddb::Reader<maxminddb::Mmap>,
+}
+
+impl MmdbDatabase {
+    /// Open a country MMDB without copying its contents into a heap buffer.
+    ///
+    /// # Safety
+    /// The mapped file must not be modified or truncated until this database
+    /// is dropped. Stop Shadowquic before updating a configured MMDB file.
+    pub unsafe fn open(path: &Path) -> Result<Self> {
+        Ok(Self {
+            // SAFETY: the caller guarantees the mapped file remains unchanged.
+            reader: unsafe { maxminddb::Reader::open_mmap(path)? },
+        })
+    }
+}
+
+impl RouterDB for MmdbDatabase {
+    fn find_ip(&self, list: &str, ip: IpAddr) -> Result<bool> {
+        // An IPv4-only database has no IPv6 members, like an empty redb v6 table.
+        if ip.is_ipv6() && self.reader.metadata().ip_version == 4 {
+            return Ok(false);
+        }
+        Ok(self
+            .reader
+            .lookup(ip)?
+            .decode::<maxminddb::geoip2::Country>()?
+            .and_then(|record| record.country.iso_code)
+            .is_some_and(|code| code.eq_ignore_ascii_case(list)))
+    }
+
+    fn find_domain(&self, _list: &str, _domain: &str) -> Result<bool> {
+        panic!("country does not support domain lookup")
+    }
+}
+
+fn open_database(cfg: &RouterDatabaseCfg) -> Result<Arc<dyn RouterDB>> {
+    if cfg.uses_mmdb() {
+        // SAFETY: configured MMDBs are read-only for the router's lifetime.
+        // Downloads never overwrite existing files; external updates require
+        // stopping Shadowquic, as documented for memory-mapped databases.
+        Ok(Arc::new(unsafe { MmdbDatabase::open(cfg.path())? }))
+    } else {
+        Ok(Arc::new(RedbDatabase::open(cfg)?))
+    }
+}
+
+fn import_database(cfg: &RouterDatabaseCfg, source: &Path) -> Result<Arc<dyn RouterDB>> {
+    if !cfg.uses_mmdb() {
+        return Ok(Arc::new(RedbDatabase::import(cfg, source)?));
+    }
+    let parent = cfg
+        .path()
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut std::fs::File::open(source)?, &mut temporary)?;
+    // SAFETY: writing is complete. Publishing renames/links this same file;
+    // it does not change its bytes. The router never modifies published MMDBs.
+    let db = unsafe { MmdbDatabase::open(temporary.path())? };
+    temporary.persist_noclobber(cfg.path())?;
+    Ok(Arc::new(db))
 }
 
 pub struct RedbDatabase {
@@ -154,8 +223,21 @@ impl RedbDatabase {
                 RouterDBKind::Country => import_country(source, &write)?,
             }
             let mut hash = Sha256::new();
-            std::io::copy(&mut std::fs::File::open(source)?, &mut hash)?;
-            let digest = format!("{:x}", hash.finalize());
+            let mut source = std::fs::File::open(source)?;
+            let mut buffer = [0; 8192];
+            loop {
+                match source.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(len) => hash.update(&buffer[..len]),
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            let digest: String = hash
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
             let mut meta = write.open_table(META)?;
             for (name, value) in [
                 ("schema", schema(cfg.kind())),
@@ -356,7 +438,7 @@ fn import_country(source: &Path, write: &redb::WriteTransaction) -> Result<()> {
 
 struct Slot {
     kind: RouterDBKind,
-    value: RwLock<std::result::Result<Arc<RedbDatabase>, String>>,
+    value: RwLock<std::result::Result<Arc<dyn RouterDB>, String>>,
 }
 #[derive(Default)]
 pub(crate) struct Databases {
@@ -371,7 +453,7 @@ impl Databases {
         for cfg in configs {
             let existing = cfg.path().try_exists()?;
             let value = if existing {
-                Ok(Arc::new(RedbDatabase::open(cfg).map_err(config_error)?))
+                Ok(open_database(cfg).map_err(config_error)?)
             } else {
                 Err("download pending".into())
             };

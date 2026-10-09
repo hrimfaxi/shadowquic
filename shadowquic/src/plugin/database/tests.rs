@@ -39,6 +39,206 @@ fn geosite(dir: &Path) -> (RouterDatabaseCfg, RedbDatabase) {
     let db = RedbDatabase::import(&cfg, &source).unwrap();
     (cfg, db)
 }
+
+fn country_fixture() -> &'static [u8] {
+    include_bytes!("../../../tests/fixtures/router-database/GeoIP2-Country-Test.mmdb")
+}
+
+fn country_config(dir: &Path, filename: &str) -> RouterDatabaseCfg {
+    RouterDatabaseCfg::Country(CountryDbCfg {
+        tag: "db".into(),
+        url: "http://download.test/country".into(),
+        path: dir.join(filename),
+    })
+}
+
+#[test]
+fn mmap_country_matches_in_memory_reader_at_all_fixture_range_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = country_config(dir.path(), "country.mmdb");
+    std::fs::write(cfg.path(), country_fixture()).unwrap();
+    let db = open_database(&cfg).unwrap();
+    let reader = maxminddb::Reader::from_source(country_fixture()).unwrap();
+    for entry in reader
+        .networks(maxminddb::WithinOptions::default().include_aliased_networks())
+        .unwrap()
+    {
+        let network = entry.unwrap().network().unwrap();
+        for ip in [network.network(), network.broadcast()] {
+            let code = reader
+                .lookup(ip)
+                .unwrap()
+                .decode::<maxminddb::geoip2::Country>()
+                .unwrap()
+                .and_then(|record| record.country.iso_code);
+            let lowercase = code.unwrap_or("missing").to_ascii_lowercase();
+            for list in [lowercase.as_str(), "GB", "US", "CN", "JP", "missing"] {
+                assert_eq!(
+                    db.find_ip(list, ip).unwrap(),
+                    code.is_some_and(|code| code.eq_ignore_ascii_case(list)),
+                    "{ip} {list}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn country_backends_publish_reopen_and_work_through_lua() {
+    for filename in ["country.mmdb", "country.MMDB", "country.redb", "legacy"] {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = country_config(dir.path(), filename);
+        let source = dir.path().join("source");
+        std::fs::write(&source, country_fixture()).unwrap();
+        drop(import_database(&cfg, &source).unwrap());
+        if cfg.uses_mmdb() {
+            assert_eq!(std::fs::read(cfg.path()).unwrap(), country_fixture());
+        } else {
+            // Existing schema-2 redb files remain readable by the original backend.
+            assert!(RedbDatabase::open(&cfg).is_ok());
+        }
+        let mut inbounds = HashMap::new();
+        let manager = Databases::build(std::slice::from_ref(&cfg), &mut inbounds).unwrap();
+        assert!(inbounds.is_empty());
+        let lua = mlua::Lua::new();
+        manager.install(&lua).unwrap();
+        for (expr, expected) in [
+            ("find_ip_v4('db', 'gb', '81.2.69.160')", true),
+            ("find_ip_v4('db', 'US', '81.2.69.160')", false),
+            ("find_ip_v4('db', 'missing', '81.2.69.160')", false),
+            ("find_ip_v6('db', 'JP', '2001:218::')", true),
+            ("find_ip_v6('db', 'GB', '::1')", false),
+        ] {
+            assert_eq!(
+                lua.load(expr).eval::<bool>().unwrap(),
+                expected,
+                "{filename}: {expr}"
+            );
+        }
+        if cfg.uses_mmdb() {
+            for address in [
+                "::ffff:81.2.69.160",
+                "2002:5102:45a0:2547:dcdc:9e8f:e890:d540",
+                "2001:0:5102:45a0:dcdc:9e8f:e890:d540",
+            ] {
+                assert!(
+                    lua.load(format!("find_ip_v6('db', 'GB', '{address}')"))
+                        .eval::<bool>()
+                        .unwrap()
+                );
+            }
+        }
+        for expr in [
+            "find_domain('db', 'GB', 'example.test')",
+            "find_ip_v4('db', 'GB', '::1')",
+            "find_ip_v6('db', 'GB', 'invalid')",
+        ] {
+            assert!(lua.load(expr).eval::<bool>().is_err());
+        }
+    }
+}
+
+#[test]
+fn invalid_mmdb_is_not_published_and_existing_files_are_not_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = country_config(dir.path(), "country.mmdb");
+    let source = dir.path().join("source");
+    std::fs::write(&source, b"not an MMDB").unwrap();
+    assert!(import_database(&cfg, &source).is_err());
+    assert!(!cfg.path().exists());
+    std::fs::write(&source, country_fixture()).unwrap();
+    std::fs::write(cfg.path(), b"existing invalid database").unwrap();
+    assert!(Databases::build(std::slice::from_ref(&cfg), &mut HashMap::new()).is_err());
+    assert!(import_database(&cfg, &source).is_err());
+    assert_eq!(
+        std::fs::read(cfg.path()).unwrap(),
+        b"existing invalid database"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+}
+
+#[tokio::test]
+async fn country_mmdb_download_publishes_original_bytes_and_reports_invalid_data() {
+    for valid in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = country_config(dir.path(), "nested/country.mmdb");
+        let mut inbounds = HashMap::new();
+        let manager = Databases::build(std::slice::from_ref(&cfg), &mut inbounds).unwrap();
+        let lua = mlua::Lua::new();
+        manager.install(&lua).unwrap();
+        assert!(
+            lua.load("find_ip_v4('db', 'GB', '81.2.69.160')")
+                .eval::<bool>()
+                .unwrap_err()
+                .to_string()
+                .contains("download pending")
+        );
+        let mut inbound = inbounds.remove("db").unwrap();
+        inbound.init().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let ProxyRequest::Tcp(mut session) = inbound.accept().await.unwrap() else {
+                panic!("expected TCP")
+            };
+            assert_eq!(session.user_context.inbound_tag, "db");
+            assert_eq!(session.dst.to_string(), "download.test:80");
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(session.stream.read_u8().await.unwrap());
+            }
+            let body = if valid {
+                country_fixture()
+            } else {
+                b"invalid MMDB"
+            };
+            session
+                .stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            session.stream.write_all(body).await.unwrap();
+            session.stream.shutdown().await.unwrap();
+            loop {
+                let pending = manager.slots["db"]
+                    .value
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| e == "download pending");
+                if !pending {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if valid {
+            assert_eq!(std::fs::read(cfg.path()).unwrap(), country_fixture());
+            assert!(
+                lua.load("find_ip_v6('db', 'GB', '2002:5102:45a0::1')")
+                    .eval::<bool>()
+                    .unwrap()
+            );
+            assert!(
+                open_database(&cfg)
+                    .unwrap()
+                    .find_ip("GB", "81.2.69.160".parse().unwrap())
+                    .unwrap()
+            );
+        } else {
+            assert!(!cfg.path().exists());
+            assert!(
+                lua.load("find_ip_v4('db', 'GB', '81.2.69.160')")
+                    .eval::<bool>()
+                    .is_err()
+            );
+        }
+        inbound.shutdown().await.unwrap();
+    }
+}
 #[test]
 fn geosite_indexed_and_sequential_rules_and_metadata_survive_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -73,7 +273,7 @@ fn geosite_indexed_and_sequential_rules_and_metadata_survive_reopen() {
     );
     assert_eq!(
         meta.get("sha256").unwrap().unwrap().value(),
-        format!("{:x}", Sha256::digest(YAML.as_bytes()))
+        "e3f5abe2173bad606b6732596670599099ba32b8fc5c4930f054642ae8615ece"
     );
     drop(meta);
     drop(read);
@@ -671,4 +871,20 @@ async fn failed_http_download_reports_error_without_publishing() {
     .unwrap();
     assert!(!cfg.path().exists());
     inbound.shutdown().await.unwrap();
+}
+
+#[test]
+fn import_hashes_sources_larger_than_the_read_buffer() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path(), RouterDBKind::Geosite);
+    let source = dir.path().join("source.yml");
+    let content = format!("{}\n{YAML}", "#".repeat(9000));
+    std::fs::write(&source, content).unwrap();
+    let db = RedbDatabase::import(&cfg, &source).unwrap();
+    let read = db.db.begin_read().unwrap();
+    let meta = read.open_table(META).unwrap();
+    assert_eq!(
+        meta.get("sha256").unwrap().unwrap().value(),
+        "0689a9e1ca1b3ea52b273fd3ba9d486f4c2252d34bd609d0ac4d792f69cb3bd2"
+    );
 }
