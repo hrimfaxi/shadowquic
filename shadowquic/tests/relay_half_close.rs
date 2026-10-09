@@ -55,6 +55,28 @@ impl Proxy {
     }
 }
 
+/// The credit test drives ~1200 sessions whose peer never closes, so it holds a
+/// socket per session for the whole run and needs far more than the common 1024
+/// soft `ulimit -n`. Raise the soft limit to the hard limit so the test measures
+/// the leak and not the shell's limit; a no-op where the hard limit is already
+/// reached, or on a platform without `setrlimit`.
+fn raise_fd_limit() {
+    #[cfg(unix)]
+    // SAFETY: `getrlimit`/`setrlimit` only read and write this process's own
+    // resource limits, and the pointer is to a local.
+    unsafe {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < limit.rlim_max
+        {
+            limit.rlim_cur = limit.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
 /// Starts a shadowquic server and a client in front of `upstream_listener`.
 ///
 /// `client_grace` is the relay bound on the client and `server_grace` the one on
@@ -62,12 +84,14 @@ impl Proxy {
 /// `MixedServer`, which serves SOCKS and HTTP CONNECT on one port, so a test can
 /// use whichever handshake suits it.
 async fn proxy_pair(client_grace: u64, server_grace: u64) -> Proxy {
+    raise_fd_limit();
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 
     let jls_upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let server_addr = unused_udp_addr();
 
     let sq_server = ShadowQuicServer::new(ShadowQuicServerCfg {
+        tag: "inbound".into(),
         bind_addr: server_addr,
         users: vec![AuthUser {
             username: "user".into(),
@@ -88,17 +112,20 @@ async fn proxy_pair(client_grace: u64, server_grace: u64) -> Proxy {
     tokio::spawn(
         Manager::single(
             Box::new(sq_server),
-            Arc::new(DirectOut::new(DirectOutCfg {
-                half_close_timeout: server_grace,
-                ..Default::default()
-            })),
+            Arc::new(DirectOut::new(
+                DirectOutCfg {
+                    half_close_timeout: server_grace,
+                    ..Default::default()
+                },
+                Arc::new(shadowquic::dns::ResolverManager::new()),
+            )),
         )
         .run(),
     );
 
     let proxy_addr = unused_tcp_addr();
     let inbound = MixedServer::new(MixedServerCfg {
-        tag: "test-mixed".into(),
+        tag: "inbound".into(),
         default_outbound: None,
         bind_addr: proxy_addr,
         users: vec![],
@@ -311,10 +338,16 @@ async fn the_relay_bound_returns_the_stream_credit() {
     /// Comfortably past the 1000-credit limit, so a leak of one credit per
     /// session would stall the connection well before the end.
     const SESSIONS: usize = 1200;
-    /// Sessions are opened in batches separated by more than the grace, so the
-    /// number open at once stays at the batch size rather than growing with
-    /// however fast the machine happens to drive the loop.
-    const BATCH: usize = 300;
+    /// Sessions are opened in batches separated by more than the watchdog's
+    /// 1–2 s reclaim latency, so the number of half-closed-but-not-yet-reclaimed
+    /// sessions at any instant is bounded by the batch size rather than by how
+    /// fast the machine drives the loop. That bound matters for more than
+    /// timing: this test runs both ends in one process, and each unreclaimed
+    /// session holds about six file descriptors (client, proxy, server→peer and
+    /// peer sockets), so an unbounded batch needs a high `ulimit -n`. With
+    /// `BATCH` at 100 the peak stays near 650 fds, inside the common 1024 soft
+    /// limit.
+    const BATCH: usize = 100;
     const SESSION_BUDGET: Duration = Duration::from_secs(5);
 
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -333,7 +366,10 @@ async fn the_relay_bound_returns_the_stream_credit() {
         }
         if (i + 1) % BATCH == 0 {
             // Let every watchdog in this batch fire before opening the next one.
-            tokio::time::sleep(Duration::from_millis(GRACE * 1000 + 300)).await;
+            // The watchdog polls every `GRACE` and fires one poll after the
+            // silence reaches `GRACE`, so it lands within 1–2 s of the
+            // half-close; 2.5 s leaves room for a loaded machine.
+            tokio::time::sleep(Duration::from_secs(GRACE * 2) + Duration::from_millis(500)).await;
         }
     }
 }
