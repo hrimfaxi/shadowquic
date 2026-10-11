@@ -9,7 +9,7 @@ description = { workspace = true }
 license = { workspace = true}
 readme = { workspace = true}
 [features]
-default = ["shadowquic-quinn", "sunnyquic-noq", "ring", "statistics", "tproxy", "mixed", "plugin-vendored", "router-db", "dns-server"]
+default = ["shadowquic-quinn", "sunnyquic-noq", "ring", "statistics", "tproxy", "mixed", "plugin-vendored", "router-db", "dns-server", "router-dhcp-lease"]
 # cost 1.4 mb
 dns-server = ["dep:simple-dns", "dep:tokio-rustls-jls", "dep:rustls_jls"]
 statistics = []
@@ -20,7 +20,8 @@ plugin-vendored = ["plugin", "mlua/vendored"] # compiling luajit from source
 plugin-system = ["plugin"] # use system package provided luajit lib.
 plugin = ["dep:mlua", "mlua/send", "mlua/async", "dep:notify"]
 # cost about 2mb, requires plugin enabled
-router-db = ["plugin", "dep:redb", "dep:maxminddb", "dep:sha2", "dep:regex", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:tokio-rustls-jls", "dep:rustls_jls", "tokio-rustls-jls/tls12", "dep:url", "dep:tempfile"]
+router-db = ["plugin", "dep:redb", "dep:maxminddb", "dep:sha2", "dep:regex", "dep:regex-automata", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:tokio-rustls-jls", "dep:rustls_jls", "tokio-rustls-jls/tls12", "dep:url", "dep:tempfile"]
+router-dhcp-lease = ["plugin"]
 ring = [
     "dep:ring",
     "quinn?/rustls-ring",
@@ -55,6 +56,7 @@ redb = { version = "4", optional = true }
 maxminddb = { version = "0.32", features = ["mmap"], optional = true }
 sha2 = { version = "0.11", optional = true }
 regex = { version = "1", optional = true }
+regex-automata = { version = "0.4", features = ["dfa-build"], optional = true }
 hyper = { version = "1", features = ["client", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
@@ -126,7 +128,8 @@ mlua = { version = "0.12", default-features = false, features = ["lua52"], optio
 mlua = { version = "0.12", default-features = false, features = ["luajit"], optional = true }
 
 # 64-bit atomics via ll/sc CAS loop on targets without native AtomicU64 (e.g. 32-bit MIPS).
-# Not optional: relay activity tracking needs AtomicU64 under every feature combination.
+# Not optional: the observer's byte counters are AtomicU64 and `observe` is compiled
+# under every feature combination.
 [target.'cfg(not(target_has_atomic = "64"))'.dependencies]
 portable-atomic = "1"
 [target.'cfg(target_os="android")'.dependencies]
@@ -143,10 +146,8 @@ windows = { version = "0.62.2", features = [
 libc = "0.2"
 
 [dev-dependencies]
-# `test-util` is what makes `#[tokio::test(start_paused = true)]` and the paused
-# clock available to the relay watchdog tests; keeping it out of [dependencies]
-# avoids shipping it.
-tokio = {version = "1.52.3", features = ["test-util"]}
+tokio = { version = "1.52.3", features = ["test-util"] }
+tempfile = "3"
 fast-socks5 = "1.0.0"
 rand = "0.10.1"
 # The relay tests drive ~1200 sessions whose peer never closes, so they hold one
@@ -159,4 +160,8 @@ cc = "1"
 
 [[example]]
 name = "ip_lookup_bench"
+required-features = ["router-db"]
+
+[[example]]
+name = "geosite_lookup_bench"
 required-features = ["router-db"]

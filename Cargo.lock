@@ -3075,7 +3075,7 @@ dependencies = [
 
 [[package]]
 name = "shadowquic"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3109,6 +3109,7 @@ dependencies = [
  "rcgen",
  "redb",
  "regex",
+ "regex-automata",
  "ring",
  "rustls",
  "rustls-jls",
@@ -3135,7 +3136,7 @@ dependencies = [
 
 [[package]]
 name = "shadowquic-macros"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "proc-macro2",
  "quote",

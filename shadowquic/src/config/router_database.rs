@@ -29,6 +29,7 @@ pub struct CountryDbCfg {
     pub url: String,
     /// Persistent file, relative to the working directory. A `.mmdb` suffix
     /// selects direct MMDB lookups; other suffixes retain redb conversion.
+    /// Cost about 3mb for mmdb file. Redb format not recommended for country database, as it is slower and larger.
     pub path: PathBuf,
 }
 
@@ -42,7 +43,11 @@ pub struct GeositeDbCfg {
     /// Defaults to the v2fly domain-list-community database in YAML format.
     #[serde(default = "default_geosite_url")]
     pub url: String,
+    /// Base domain sets to import, matched case insensitively. Empty imports all sets.
+    #[serde(default)]
+    pub list_include: Vec<String>,
     /// Persistent converted redb file, relative to the working directory.
+    /// Cost about 16m for full geosite db. 1Mb for only cn list.
     pub path: PathBuf,
 }
 
@@ -95,6 +100,30 @@ pub enum RouterDBKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geosite_list_defaults_and_round_trips() {
+        for (field, expected) in [
+            ("", vec![]),
+            ("list-include: []", vec![]),
+            (
+                "list-include: [google, geolocation-cn]",
+                vec!["google", "geolocation-cn"],
+            ),
+        ] {
+            let cfg: RouterDatabaseCfg = serde_saphyr::from_str(&format!(
+                "type: geosite\ntag: db\npath: db.redb\n{field}\n"
+            ))
+            .unwrap();
+            let encoded = serde_saphyr::to_string(&cfg).unwrap();
+            let RouterDatabaseCfg::Geosite(decoded) =
+                serde_saphyr::from_str::<RouterDatabaseCfg>(&encoded).unwrap()
+            else {
+                unreachable!()
+            };
+            assert_eq!(decoded.list_include, expected);
+        }
+    }
 
     #[test]
     fn mmdb_suffix_selects_only_country_backend() {

@@ -1,7 +1,7 @@
 use super::config::{DnsFakeIpServerCfg, DnsSystemServerCfg, DnsUdpServerCfg};
 use super::*;
 use crate::{
-    Manager, UdpRecv,
+    AnyUdpRecv, AnyUdpSend, Manager, UdpRecv,
     config::{Config, DirectOutCfg},
     direct::outbound::DirectOut,
     msgs::socks5::AddrOrDomain,
@@ -388,13 +388,16 @@ async fn hijacked_dns_keeps_original_reply_source() {
     send.send((query("hijacked.test", TYPE::A, 42).into(), dst.clone()))
         .await
         .unwrap();
-    let session = UdpSession::from_recv(
-        Arc::new(reply_send),
-        Box::new(recv),
-        None,
-        "0.0.0.0:0".parse::<SocketAddr>().unwrap().into(),
-        UserContext::default(),
-    )
+    let session = UdpSession::<AnyUdpRecv, AnyUdpSend> {
+        recv: Box::new(recv),
+        send: Arc::new(reply_send),
+        stream: None,
+        bind_addr: "0.0.0.0:0".parse::<SocketAddr>().unwrap().into(),
+        dst: "0.0.0.0:0".parse::<SocketAddr>().unwrap().into(),
+        src_addr: None,
+        user_context: UserContext::default(),
+    }
+    .wait_first_packet()
     .await
     .unwrap();
     manager.outbounds["fake"]
@@ -407,6 +410,108 @@ async fn hijacked_dns_keeps_original_reply_source() {
         .unwrap();
     assert_eq!(source, dst);
     assert_eq!(Packet::parse(&bytes).unwrap().id(), 42);
+}
+
+fn tcp_hijack_request(stream: tokio::io::DuplexStream, inbound_tag: &str) -> ProxyRequest {
+    ProxyRequest::Tcp(TcpSession {
+        stream: Box::new(stream),
+        dst: "192.0.2.53:53".parse::<SocketAddr>().unwrap().into(),
+        src_addr: None,
+        user_context: UserContext {
+            inbound_tag: inbound_tag.into(),
+            ..UserContext::default()
+        },
+    })
+}
+
+fn hijack_resolver() -> Resolver {
+    let (requests, _) = mpsc::channel(1);
+    Resolver {
+        tag: "dns".into(),
+        backend: Backend::System,
+        requests,
+        fake_ip: None,
+        cache: Arc::new(DnsCache::default()),
+        bypass_cache: false,
+    }
+}
+
+#[tokio::test]
+async fn hijacked_tcp_dns_handles_fragmented_and_pipelined_queries_without_truncation() {
+    let resolver = hijack_resolver();
+    let first = query("hijacked.test", TYPE::A, 42);
+    let mut reply = reply_for(Packet::parse(&first).unwrap());
+    for _ in 0..40 {
+        reply.answers.push(ResourceRecord::new(
+            reply.questions[0].qname.clone(),
+            CLASS::IN,
+            60,
+            RData::A(Ipv4Addr::LOCALHOST.into()),
+        ));
+    }
+    resolver.cache.insert(&first, reply);
+    let (mut client, stream) = tokio::io::duplex(4096);
+    resolver
+        .handle(tcp_hijack_request(stream, "socks"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        // Split both the length prefix and query body across writes.
+        let length = (first.len() as u16).to_be_bytes();
+        client.write_all(&length[..1]).await.unwrap();
+        tokio::task::yield_now().await;
+        client.write_all(&length[1..]).await.unwrap();
+        client.write_all(&first[..5]).await.unwrap();
+        tokio::task::yield_now().await;
+        client.write_all(&first[5..]).await.unwrap();
+        write_frame(&mut client, &query("hijacked.test", TYPE::A, 43))
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+        for id in [42, 43] {
+            let bytes = read_frame(&mut client).await.unwrap();
+            assert!(bytes.len() > 512);
+            let reply = Packet::parse(&bytes).unwrap();
+            assert_eq!(reply.id(), id);
+            assert_eq!(reply.answers.len(), 40);
+            assert!(!reply.has_flags(PacketFlag::TRUNCATION));
+        }
+        assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn hijacked_tcp_dns_rejects_own_upstream() {
+    let resolver = hijack_resolver();
+    let (_client, stream) = tokio::io::duplex(64);
+    let error = resolver
+        .handle(tcp_hijack_request(stream, "dns"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SError::DnsError(message) if message.contains("own resolver")));
+}
+
+#[tokio::test]
+async fn hijacked_tcp_dns_closes_on_invalid_or_incomplete_frames() {
+    for bytes in [&[0, 1][..], &[0, 12, 0], &[0]] {
+        let resolver = hijack_resolver();
+        let (mut client, stream) = tokio::io::duplex(64);
+        resolver
+            .handle(tcp_hijack_request(stream, "socks"))
+            .await
+            .unwrap();
+        client.write_all(bytes).await.unwrap();
+        client.shutdown().await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), client.read(&mut [0]))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
 }
 
 struct OneRequest(Option<ProxyRequest>);
@@ -426,13 +531,16 @@ async fn fakeip_udp_is_restored_before_routing_and_replies_use_fake_source() {
     tx.send((Bytes::from_static(b"one"), dst.clone()))
         .await
         .unwrap();
-    let session = UdpSession::from_recv(
-        Arc::new(reply_tx),
-        Box::new(rx),
-        None,
-        "0.0.0.0:0".parse::<SocketAddr>().unwrap().into(),
-        UserContext::default(),
-    )
+    let session = UdpSession::<AnyUdpRecv, AnyUdpSend> {
+        recv: Box::new(rx),
+        send: Arc::new(reply_tx),
+        stream: None,
+        bind_addr: "0.0.0.0:0".parse::<SocketAddr>().unwrap().into(),
+        dst: "0.0.0.0:0".parse::<SocketAddr>().unwrap().into(),
+        src_addr: None,
+        user_context: UserContext::default(),
+    }
+    .wait_first_packet()
     .await
     .unwrap();
     let mut inbound = RestoringInbound {
@@ -581,13 +689,16 @@ async fn selected_resolver_handles_tcp_and_udp_destinations_and_preserves_ports(
     tx.send((Bytes::from_static(b"second"), second.clone()))
         .await
         .unwrap();
-    let session = UdpSession::from_recv(
-        Arc::new(send),
-        Box::new(recv),
-        None,
-        "0.0.0.0:0".parse::<SocketAddr>().unwrap().into(),
-        UserContext::default(),
-    )
+    let session = UdpSession::<AnyUdpRecv, AnyUdpSend> {
+        recv: Box::new(recv),
+        send: Arc::new(send),
+        stream: None,
+        bind_addr: "0.0.0.0:0".parse::<SocketAddr>().unwrap().into(),
+        dst: "0.0.0.0:0".parse::<SocketAddr>().unwrap().into(),
+        src_addr: None,
+        user_context: UserContext::default(),
+    }
+    .wait_first_packet()
     .await
     .unwrap();
     outbound.handle(ProxyRequest::Udp(session)).await.unwrap();

@@ -8,9 +8,8 @@ use crate::config::{
     default_alpn, default_blackhole_detection, default_brutal_ack_compensate,
     default_brutal_bandwidth, default_brutal_cwnd_gain, default_brutal_min_ack_rate,
     default_brutal_min_sample_count, default_brutal_min_window, default_congestion_control,
-    default_gso, default_half_close_timeout, default_initial_mtu, default_keep_alive_interval,
-    default_min_mtu, default_mtu_discovery, default_over_stream, default_store_flush_interval,
-    default_zero_rtt,
+    default_gso, default_initial_mtu, default_keep_alive_interval, default_min_mtu,
+    default_mtu_discovery, default_over_stream, default_store_flush_interval, default_zero_rtt,
 };
 
 pub fn default_rate_limit() -> u64 {
@@ -156,6 +155,7 @@ impl Default for ShadowQuicServerCfg {
 impl Default for ShadowQuicClientCfg {
     fn default() -> Self {
         Self {
+            half_close_timeout: crate::config::default_half_close_timeout(),
             #[cfg(feature = "dns-server")]
             dns: None,
             #[cfg(feature = "dns-server")]
@@ -172,7 +172,6 @@ impl Default for ShadowQuicClientCfg {
             over_stream: Default::default(),
             min_mtu: default_min_mtu(),
             keep_alive_interval: default_keep_alive_interval(),
-            half_close_timeout: default_half_close_timeout(),
             gso: default_gso(),
             mtu_discovery: default_mtu_discovery(),
             blackhole_detection: default_blackhole_detection(),
@@ -227,6 +226,10 @@ impl Default for BrutalParams {
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ShadowQuicClientCfg {
+    /// Inactivity timeout after either TCP source reaches EOF, in milliseconds.
+    /// Defaults to 60 seconds. Zero disables the timeout.
+    #[serde(default = "crate::config::default_half_close_timeout")]
+    pub half_close_timeout: u64,
     /// DNS service used to resolve destination domains after routing.
     #[cfg(feature = "dns-server")]
     pub dns: Option<String>,
@@ -278,20 +281,6 @@ pub struct ShadowQuicClientCfg {
     /// Disabled by default.
     #[serde(default = "default_keep_alive_interval")]
     pub keep_alive_interval: u32,
-
-    /// Relay half-close timeout in seconds.
-    ///
-    /// `copy_bidirectional` returns only once both directions reach EOF, so a
-    /// session whose peer never closes its half would hold its QUIC bi-stream
-    /// forever and keep it counted against the peer's stream limit. Once one
-    /// direction has finished, the relay gives the session up if the surviving
-    /// direction then stays silent this long. Only the surviving direction can
-    /// still carry bytes at that point, and any byte it moves restarts the
-    /// count. A session merely idle with both directions still open never
-    /// reaches this state and is never touched. 0 disables the watchdog.
-    /// Default 600.
-    #[serde(default = "default_half_close_timeout")]
-    pub half_close_timeout: u64,
 
     /// Enable QUIC Generic Segmentation Offload (GSO).
     /// Controls [`quinn::TransportConfig::enable_segmentation_offload`]. When supported, GSO reduces

@@ -39,6 +39,8 @@ pub mod utils;
 
 pub use msgs::SDecode;
 pub use msgs::SEncode;
+
+use crate::utils::dual_socket::to_ipv4_mapped;
 #[cfg(test)]
 mod manager_tests;
 pub enum ProxyRequest<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend> {
@@ -77,6 +79,12 @@ impl ProxyRequest {
         match self {
             ProxyRequest::Tcp(session) => session.dst = dst,
             ProxyRequest::Udp(session) => session.dst = dst,
+        }
+    }
+    pub fn src_addr(&self) -> &Option<SocketAddr> {
+        match self {
+            ProxyRequest::Tcp(TcpSession { src_addr, .. }) => src_addr,
+            ProxyRequest::Udp(UdpSession { src_addr, .. }) => src_addr,
         }
     }
 }
@@ -128,28 +136,19 @@ pub struct UdpSession<I = AnyUdpRecv, O = AnyUdpSend> {
 }
 impl UdpSession {
     /// Wait for the first datagram and retain it for the outbound receiver.
-    pub(crate) async fn from_recv(
-        send: AnyUdpSend,
-        mut recv: AnyUdpRecv,
-        stream: Option<AnyTcp>,
-        bind_addr: SocksAddr,
-        user_context: UserContext,
-    ) -> Result<Self, SError> {
-        let first = recv.recv_from().await?;
+    pub(crate) async fn wait_first_packet(mut self) -> Result<Self, SError> {
+        let first: (Bytes, SocksAddr) = self.recv.recv_from().await?;
         Ok(Self {
             dst: first.1.clone(),
-            src_addr: stream
-                .as_ref()
-                .and_then(|stream| stream.peer_addr())
-                .or(user_context.src_addr),
+            src_addr: self.src_addr,
             recv: Box::new(FirstPacketUdpRecv {
                 first: Some(first),
-                inner: recv,
+                inner: self.recv,
             }),
-            send,
-            stream,
-            bind_addr,
-            user_context,
+            send: self.send,
+            stream: self.stream,
+            bind_addr: self.bind_addr,
+            user_context: self.user_context,
         })
     }
 }
@@ -179,6 +178,7 @@ pub struct DnsQuery {
 /// Per-session context, present even when statistics are not tracked.
 #[derive(Clone, Default)]
 pub struct UserContext {
+    /// Address of whoever opened the connection, when the inbound knows it.
     pub src_addr: Option<SocketAddr>,
     pub inbound_tag: String,
     /// Outbound preference stamped by the accepting inbound on every request.
@@ -207,7 +207,7 @@ pub trait TcpTrait: AsyncRead + AsyncWrite + Unpin + Send + Sync {
 }
 impl TcpTrait for TcpStream {
     fn peer_addr(&self) -> Option<SocketAddr> {
-        TcpStream::peer_addr(self).ok()
+        TcpStream::peer_addr(self).ok().map(to_ipv4_mapped)
     }
 }
 
