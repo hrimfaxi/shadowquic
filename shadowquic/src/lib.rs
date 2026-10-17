@@ -35,12 +35,22 @@ pub mod squic;
 pub mod sunnyquic;
 #[cfg(all(feature = "tproxy", target_os = "linux"))]
 pub mod tproxy;
+#[cfg(all(
+    feature = "tun",
+    any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    )
+))]
+pub mod tun;
 pub mod utils;
 
 pub use msgs::SDecode;
 pub use msgs::SEncode;
 
-use crate::utils::dual_socket::to_ipv4_mapped;
+use crate::{observe::Observer, utils::dual_socket::to_ipv4_mapped};
 #[cfg(test)]
 mod manager_tests;
 pub enum ProxyRequest<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend> {
@@ -181,6 +191,7 @@ pub struct UserContext {
     /// Address of whoever opened the connection, when the inbound knows it.
     pub src_addr: Option<SocketAddr>,
     pub inbound_tag: String,
+    pub observer: Weak<Observer>,
     /// Outbound preference stamped by the accepting inbound on every request.
     /// A router script may honor or override it; without one it selects the
     /// outbound, and `None` falls back to the global default.
@@ -272,7 +283,7 @@ struct RequestDispatcher {
 
 impl RequestDispatcher {
     async fn dispatch(&self, req: ProxyRequest) {
-        #[cfg(feature = "plugin")]
+        #[cfg(any(feature = "plugin", feature = "statistics"))]
         let mut req = req;
         #[cfg(feature = "plugin")]
         let outbound_tag = match self.router.as_ref() {
@@ -307,6 +318,12 @@ impl RequestDispatcher {
             error!(outbound = %outbound_tag, "selected an unknown outbound");
             return;
         };
+        #[cfg(feature = "statistics")]
+        {
+            if let Some(observer) = req.user_context().observer.upgrade() {
+                req = observer.wrap_request(req, outbound_tag.clone()).await;
+            }
+        }
         tracing::debug!(outbound = %outbound_tag, dst = %req.dst(), "routing request");
         if let Err(error) = outbound
             .handle(req)

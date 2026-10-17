@@ -29,6 +29,16 @@ pub use crate::dns::config::{
 };
 #[cfg(all(feature = "tproxy", target_os = "linux"))]
 use crate::tproxy::inbound::TproxyServer;
+#[cfg(all(
+    feature = "tun",
+    any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    )
+))]
+pub use crate::tun::TunServerCfg;
 
 mod shadowquic;
 mod sunnyquic;
@@ -171,6 +181,18 @@ impl Config {
             )));
         }
         for inbound in &self.inbounds {
+            #[cfg(all(
+                feature = "tun",
+                any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "windows",
+                    target_os = "android"
+                )
+            ))]
+            if let InboundCfg::Tun(cfg) = inbound {
+                cfg.validate()?;
+            }
             if let Some(tag) = inbound.default_outbound()
                 && !self.outbound_tags().any(|outbound| outbound == tag)
             {
@@ -235,13 +257,38 @@ impl Config {
         let mut resolver_manager = Arc::new(ResolverManager::new());
         #[cfg(not(feature = "dns-server"))]
         let resolver_manager = Arc::new(ResolverManager::new());
-        #[cfg(all(feature = "dns-server", feature = "tproxy", target_os = "linux"))]
+        #[cfg(all(
+            feature = "dns-server",
+            any(
+                all(feature = "tproxy", target_os = "linux"),
+                all(
+                    feature = "tun",
+                    any(
+                        target_os = "linux",
+                        target_os = "macos",
+                        target_os = "windows",
+                        target_os = "android"
+                    )
+                )
+            )
+        ))]
         let mut fake_ip = None;
         #[cfg(feature = "dns-server")]
         for cfg in self.dns {
             let tag = cfg.tag().to_owned();
             let server = cfg.build_with_cache(resolver_manager.cache()).await?;
-            #[cfg(all(feature = "tproxy", target_os = "linux"))]
+            #[cfg(any(
+                all(feature = "tproxy", target_os = "linux"),
+                all(
+                    feature = "tun",
+                    any(
+                        target_os = "linux",
+                        target_os = "macos",
+                        target_os = "windows",
+                        target_os = "android"
+                    )
+                )
+            ))]
             if server.resolver.fake_ip.is_some() {
                 fake_ip = server.resolver.fake_ip.clone();
             }
@@ -298,10 +345,38 @@ impl Config {
         for cfg in self.inbounds {
             let tag = cfg.tag().to_owned();
             let span = info_span!("inbound", tag = %tag);
-            #[cfg(all(feature = "dns-server", feature = "tproxy", target_os = "linux"))]
-            let restore_fake = matches!(&cfg, InboundCfg::Tproxy(_));
+            #[cfg(all(
+                feature = "dns-server",
+                any(
+                    all(feature = "tproxy", target_os = "linux"),
+                    all(
+                        feature = "tun",
+                        any(
+                            target_os = "linux",
+                            target_os = "macos",
+                            target_os = "windows",
+                            target_os = "android"
+                        )
+                    )
+                )
+            ))]
+            let restore_fake = cfg.restores_fake_ip();
             let inbound = cfg.build_inbound().instrument(span).await?;
-            #[cfg(all(feature = "dns-server", feature = "tproxy", target_os = "linux"))]
+            #[cfg(all(
+                feature = "dns-server",
+                any(
+                    all(feature = "tproxy", target_os = "linux"),
+                    all(
+                        feature = "tun",
+                        any(
+                            target_os = "linux",
+                            target_os = "macos",
+                            target_os = "windows",
+                            target_os = "android"
+                        )
+                    )
+                )
+            ))]
             let inbound = if restore_fake && let Some(fake) = fake_ip.clone() {
                 Box::new(crate::dns::RestoringInbound {
                     inner: inbound,
@@ -337,6 +412,16 @@ impl Config {
 #[serde(rename_all = "kebab-case")]
 #[serde(tag = "type")]
 pub enum InboundCfg {
+    #[cfg(all(
+        feature = "tun",
+        any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "windows",
+            target_os = "android"
+        )
+    ))]
+    Tun(TunServerCfg),
     Socks(SocksServerCfg),
     #[cfg(feature = "mixed")]
     Mixed(MixedServerCfg),
@@ -349,9 +434,51 @@ pub enum InboundCfg {
     Tproxy(TproxyServerCfg),
 }
 impl InboundCfg {
+    #[cfg(all(
+        feature = "dns-server",
+        any(
+            all(feature = "tproxy", target_os = "linux"),
+            all(
+                feature = "tun",
+                any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "windows",
+                    target_os = "android"
+                )
+            )
+        )
+    ))]
+    fn restores_fake_ip(&self) -> bool {
+        match self {
+            #[cfg(all(feature = "tproxy", target_os = "linux"))]
+            Self::Tproxy(_) => true,
+            #[cfg(all(
+                feature = "tun",
+                any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "windows",
+                    target_os = "android"
+                )
+            ))]
+            Self::Tun(_) => true,
+            _ => false,
+        }
+    }
     /// Returns the endpoint label.
     pub fn tag(&self) -> &str {
         match self {
+            #[cfg(all(
+                feature = "tun",
+                any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "windows",
+                    target_os = "android"
+                )
+            ))]
+            Self::Tun(cfg) => &cfg.tag,
             Self::Socks(cfg) => &cfg.tag,
             #[cfg(feature = "mixed")]
             Self::Mixed(cfg) => &cfg.tag,
@@ -366,6 +493,16 @@ impl InboundCfg {
     /// configured. `None` means the global default outbound.
     pub fn default_outbound(&self) -> Option<&str> {
         match self {
+            #[cfg(all(
+                feature = "tun",
+                any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "windows",
+                    target_os = "android"
+                )
+            ))]
+            Self::Tun(cfg) => cfg.default_outbound.as_deref(),
             Self::Socks(cfg) => cfg.default_outbound.as_deref(),
             #[cfg(feature = "mixed")]
             Self::Mixed(cfg) => cfg.default_outbound.as_deref(),
@@ -378,6 +515,16 @@ impl InboundCfg {
 
     async fn build_inbound(self) -> Result<Box<dyn Inbound>, SError> {
         let r: Box<dyn Inbound> = match self {
+            #[cfg(all(
+                feature = "tun",
+                any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "windows",
+                    target_os = "android"
+                )
+            ))]
+            Self::Tun(cfg) => Box::new(crate::tun::TunServer::new(cfg).await?),
             InboundCfg::Socks(cfg) => Box::new(SocksServer::new(cfg).await?),
             #[cfg(feature = "mixed")]
             InboundCfg::Mixed(cfg) => Box::new(MixedServer::new(cfg).await?),
@@ -557,7 +704,7 @@ pub struct AuthUser {
 pub struct SocksClientCfg {
     /// Inactivity timeout after either TCP source reaches EOF, in milliseconds.
     /// Defaults to 60 seconds. Zero disables the timeout.
-    #[serde(default = "crate::config::default_half_close_timeout")]
+    #[serde(default = "default_half_close_timeout")]
     pub half_close_timeout: u64,
     /// DNS service used to resolve destination domains after routing.
     #[cfg(feature = "dns-server")]
@@ -591,7 +738,7 @@ pub struct SocketOpt {
     /// Example:
     /// ```yaml
     /// # by ip address
-    /// bind-interface: "127.0.0.1"
+    /// bind-interface: "127.0.0.1:0"
     /// # by interface name
     /// bind-interface: "eth0"
     /// ```
@@ -722,8 +869,7 @@ impl PartialEq for CongestionControl {
 /// ```yaml
 /// tag: proxy
 /// dns-strategy: prefer-ipv4 # or prefer-ipv6, ipv4-only, ipv6-only
-/// half-close-timeout: 600 # seconds, 0 disables the watchdog
-/// bind-interface: "127.0.0.1" # optional, by IP address or interface name
+/// bind-interface: "127.0.0.1:0" # optional, by IP address or interface name
 /// fw-mark: 1234 # optional, Linux fwmark
 /// ```
 #[derive(Deserialize, Clone, Debug)]
@@ -731,7 +877,7 @@ impl PartialEq for CongestionControl {
 pub struct DirectOutCfg {
     /// Inactivity timeout after either TCP source reaches EOF, in milliseconds.
     /// Defaults to 60 seconds. Zero disables the timeout.
-    #[serde(default = "crate::config::default_half_close_timeout")]
+    #[serde(default = "default_half_close_timeout")]
     pub half_close_timeout: u64,
     /// DNS service used to resolve destination domains after routing.
     #[cfg(feature = "dns-server")]
@@ -1635,5 +1781,11 @@ outbounds:
                 CipherSuitePreference::Aes128Gcm,
             ]
         );
+    }
+
+    #[cfg(not(feature = "tun"))]
+    #[test]
+    fn tun_inbound_requires_the_tun_feature() {
+        assert!(serde_saphyr::from_str::<super::InboundCfg>("type: tun\ntag: tun-in\n").is_err());
     }
 }
