@@ -291,7 +291,7 @@ impl UdpSend for Sender<(Bytes, SocksAddr)> {
         let siz = buf.len();
         self.send((buf, addr))
             .await
-            .map_err(|_| SError::InboundUnavailable)?;
+            .map_err(|_| SError::UDPSessionClosed("udp session receiver dropped".into()))?;
         Ok(siz)
     }
     async fn closed(&self) {
@@ -301,8 +301,11 @@ impl UdpSend for Sender<(Bytes, SocksAddr)> {
 #[async_trait]
 impl UdpRecv for Receiver<(Bytes, SocksAddr)> {
     async fn recv_from(&mut self) -> Result<(Bytes, SocksAddr), SError> {
-        let r = self.recv().await.ok_or(SError::OutboundUnavailable)?;
-        Ok(r)
+        // A dropped sender ends the association; keep it distinguishable from a
+        // failing outbound so relays can report it as teardown, not as an error.
+        self.recv()
+            .await
+            .ok_or_else(|| SError::UDPSessionClosed("udp session sender dropped".into()))
     }
 }
 pub struct Manager {

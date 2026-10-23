@@ -55,13 +55,7 @@ impl Outbound for SocksClient {
             }
         };
 
-        tokio::spawn(
-            async {
-                fut.await
-                    .map_err(|x| error!("error due to handle socks request:{}", x))
-            }
-            .instrument(span),
-        );
+        tokio::spawn(async { crate::utils::log_session_result(fut.await) }.instrument(span));
         Ok(())
     }
 }

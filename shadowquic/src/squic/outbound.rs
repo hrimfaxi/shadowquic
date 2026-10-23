@@ -179,7 +179,7 @@ pub async fn handle_request<C: QuicConnection>(
             };
             tokio::spawn(
                 async {
-                    let _ = fut.await.map_err(|x| error!("{}", x));
+                    crate::utils::log_session_result(fut.await);
                 }
                 .instrument(_span),
             );

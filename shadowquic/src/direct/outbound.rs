@@ -84,7 +84,7 @@ impl Outbound for DirectOut {
                 };
                 tokio::spawn(
                     async {
-                        let _ = fut.await.map_err(|x| error!("{}", x));
+                        crate::utils::log_session_result(fut.await);
                     }
                     .in_current_span(),
                 );

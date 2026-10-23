@@ -1,5 +1,7 @@
 use super::*;
-use crate::{Outbound, RequestDispatcher, Stoppable, TcpSession, UdpSession, UserContext};
+use crate::{
+    Outbound, RequestDispatcher, Stoppable, TcpSession, UdpSession, UserContext, error::SError,
+};
 use std::{future::Future, task::Waker};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -289,13 +291,18 @@ async fn udp_tracks_first_packet_errors_and_independent_half_lifetimes() {
     assert_eq!(recv_reply.recv().await.unwrap().0, b"reply"[..]);
     drop(send_request);
     drop(recv_reply);
-    assert!(udp.recv.recv_from().await.is_err());
-    assert!(
+    // Dropping either half ends the association, which relays must be able to
+    // tell apart from a failing outbound.
+    assert!(matches!(
+        udp.recv.recv_from().await,
+        Err(SError::UDPSessionClosed(_))
+    ));
+    assert!(matches!(
         udp.send
             .send_to(Bytes::from_static(b"failed"), addr())
-            .await
-            .is_err()
-    );
+            .await,
+        Err(SError::UDPSessionClosed(_))
+    ));
     assert_eq!(
         send.upgrade().unwrap().bytes_send.load(Ordering::Relaxed),
         5

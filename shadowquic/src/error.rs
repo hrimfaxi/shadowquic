@@ -30,12 +30,20 @@ pub enum SError {
     DomainResolveFailed(String),
     #[error("mpsc channel error: {0}")]
     ChannelError(String),
-    #[error("UDP session closed closed due to: {0}")]
+    #[error("UDP session closed due to: {0}")]
     UDPSessionClosed(String),
     #[error("socks error: {0}")]
     SocksError(String),
     #[error("Sunnyquic authentication error: {0}")]
     SunnyAuthError(String),
+}
+
+impl SError {
+    /// Ordinary teardown of a UDP association, rather than a failure: the peer
+    /// dropped the datagram channel after its exchange finished.
+    pub(crate) fn is_session_end(&self) -> bool {
+        matches!(self, Self::UDPSessionClosed(_))
+    }
 }
 
 pub type SResult<T> = result::Result<T, SError>;
