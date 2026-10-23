@@ -516,17 +516,24 @@ class RenderContext:
 
 
 _ENUM_VARIANT_EXPR_RE = re.compile(r"^([A-Z][A-Za-z0-9_]*)::([A-Z][A-Za-z0-9_]*)$")
+_PARSED_STRING_EXPR_RE = re.compile(r'^"([^"\\]*)"\.parse\(\)\.unwrap\(\)$')
 
 
 def render_default_value(expr: str, ctx: RenderContext) -> str:
     """Pretty-print a default expression for display in the YAML schema.
 
-    Currently only rewrites `EnumName::VariantName` constructors into their
-    serde tag value (`CongestionControl::Bbr` -> `bbr`). Anything else is
-    returned unchanged.
+    Unwrap Some defaults, rewrite enum constructors into their serde tags, and
+    render parsed string literals as their value (for example, a CIDR).
+    Other expressions are unchanged.
     """
     if not expr:
         return expr
+    optional = re.fullmatch(r"Some\((.*)\)", expr.strip())
+    if optional:
+        return render_default_value(optional.group(1), ctx)
+    parsed = _PARSED_STRING_EXPR_RE.fullmatch(expr.strip())
+    if parsed:
+        return parsed.group(1)
     m = _ENUM_VARIANT_EXPR_RE.match(expr.strip())
     if m:
         key = f"{m.group(1)}::{m.group(2)}"
@@ -1135,6 +1142,14 @@ def plan_pages(
         ))
         placed.add("RouterCfg")
 
+    api = next((it for it in discovered if it.name == "ApiConfig"), None)
+    if api is not None:
+        pages.append(PageSpec(
+            title="REST API", nav_label="REST API",
+            rel_path="configuration/restful-api.md", item_id=int(api.id),
+        ))
+        placed.add("ApiConfig")
+
     # Everything else reachable from the roots becomes a shared type page.
     for it in discovered:
         if it.name in placed or not it.name:
@@ -1191,7 +1206,7 @@ def render_nav(
         lines.append('    ] },')
 
     for p in cfg_pages:
-        if p.rel_path == "configuration/router.md":
+        if p.rel_path in ("configuration/router.md", "configuration/restful-api.md"):
             lines.append(f'    {{ "{p.nav_label}" = "{p.rel_path}" }},')
 
     if shared_pages:

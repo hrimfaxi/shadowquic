@@ -1,5 +1,6 @@
 use super::config::{DnsFakeIpServerCfg, DnsSystemServerCfg, DnsUdpServerCfg};
 use super::*;
+use crate::TcpSession;
 use crate::{
     AnyUdpRecv, AnyUdpSend, Manager, UdpRecv,
     config::{Config, DirectOutCfg},
@@ -756,6 +757,49 @@ impl Outbound for Capture {
 }
 
 #[tokio::test]
+async fn resolving_outbound_preserves_request_span_in_spawned_task() {
+    use tracing::Instrument;
+
+    struct CaptureSpan(mpsc::Sender<Option<tracing::span::Id>>);
+    #[async_trait]
+    impl Outbound for CaptureSpan {
+        async fn handle(&self, _req: ProxyRequest) -> Result<()> {
+            self.0
+                .send(tracing::Span::current().id())
+                .await
+                .map_err(dns_error)
+        }
+    }
+
+    let _subscriber = tracing::subscriber::set_default(tracing_subscriber::registry());
+    let span = tracing::info_span!(parent: None, "request");
+    let expected = span.id();
+    assert!(expected.is_some());
+    let (tx, mut rx) = mpsc::channel(1);
+    let outbound = ResolvingOutbound {
+        inner: Arc::new(CaptureSpan(tx)),
+        resolver: Arc::new(hijack_resolver()),
+        strategy: crate::config::DnsStrategy::Ipv4Only,
+    };
+    let (stream, _peer) = tokio::io::duplex(64);
+    outbound
+        .handle(ProxyRequest::Tcp(TcpSession {
+            stream: Box::new(stream),
+            dst: "127.0.0.1:1234".parse::<SocketAddr>().unwrap().into(),
+            src_addr: None,
+            user_context: UserContext::default(),
+        }))
+        .instrument(span)
+        .await
+        .unwrap();
+    let actual = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
 async fn selected_resolver_handles_tcp_and_udp_destinations_and_preserves_ports() {
     let server = DnsSystemServerCfg {
         bypass_cache: false,
@@ -831,6 +875,7 @@ dns:
   - {tag: udp, type: dns-udp, bind-addr: '127.0.0.1:0', upstream: '127.0.0.1:53'}
   - {tag: tcp, type: dns-tcp, bind-addr: '127.0.0.1:0', upstream: '127.0.0.1:53'}
   - {tag: tls, type: dns-tls, bind-addr: '127.0.0.1:0', upstream: '127.0.0.1:853', server-name: dns.test}
+  - {tag: quic, type: dns-quic, bind-addr: '127.0.0.1:0', upstream: '127.0.0.1:853', server-name: dns.test}
 outbounds:
   - {tag: direct, type: direct, dns: system}
   - {tag: socks, type: socks, addr: '127.0.0.1:1080', dns: system}
@@ -838,10 +883,10 @@ outbounds:
   - {tag: sunny, type: sunnyquic, addr: '127.0.0.1:443', username: test, password: test, server-name: localhost, dns: system}
 "#).unwrap();
     let manager = config.build_manager().await.unwrap();
-    assert_eq!(manager.inbounds.len(), 6);
-    assert_eq!(manager.outbounds.len(), 9);
+    assert_eq!(manager.inbounds.len(), 7);
+    assert_eq!(manager.outbounds.len(), 10);
     assert_eq!(manager.default_outbound, "direct");
-    for tag in ["system", "fake", "udp", "tcp", "tls"] {
+    for tag in ["system", "fake", "udp", "tcp", "tls", "quic"] {
         assert!(manager.outbounds.contains_key(tag));
     }
 }
@@ -1181,6 +1226,11 @@ fn dns_configurations_require_only_their_own_fields() {
             ", upstream: '127.0.0.1:853', server-name: dns.test",
             ", unknown: true",
         ),
+        (
+            "dns-quic",
+            ", upstream: '127.0.0.1:853', server-name: dns.test",
+            ", unknown: true",
+        ),
         ("dns-fakeip", "", ", upstream: '127.0.0.1:53'"),
         ("dns-system", "", ", upstream: '127.0.0.1:53'"),
     ] {
@@ -1233,12 +1283,6 @@ async fn tls_configuration_rejects_invalid_server_name_before_binding() {
     };
     assert!(config.validate().is_err());
     assert!(config.build().await.is_err());
-}
-
-#[test]
-fn dns_tls_connector_disables_jls() {
-    let connector = tls_connector().unwrap();
-    assert!(!connector.config().jls_config.enable);
 }
 
 #[tokio::test]
@@ -1563,6 +1607,10 @@ async fn bypass_cache_defaults_to_false_and_is_configurable_except_for_fakeip() 
         ("dns-tcp", ", upstream: '127.0.0.1:53'"),
         (
             "dns-tls",
+            ", upstream: '127.0.0.1:853', server-name: dns.test",
+        ),
+        (
+            "dns-quic",
             ", upstream: '127.0.0.1:853', server-name: dns.test",
         ),
         ("dns-system", ""),

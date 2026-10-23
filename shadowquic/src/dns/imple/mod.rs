@@ -3,6 +3,7 @@ mod cache;
 pub mod config;
 mod fakeip;
 mod integration;
+mod quic;
 #[cfg(test)]
 mod tests;
 
@@ -40,8 +41,10 @@ use tokio::{
 use tracing::instrument;
 
 use crate::{
-    AnyTcp, DnsQuery, Inbound, Outbound, ProxyRequest, TcpSession, TcpTrait, UdpSession,
-    UserContext, error::SError, msgs::socks5::SocksAddr,
+    AnyTcp, DnsQuery, Inbound, Outbound, ProxyRequest, UdpSession, UserContext,
+    error::SError,
+    msgs::socks5::SocksAddr,
+    utils::{proxy::tcp_request, tls::tls_connector},
 };
 
 type Result<T> = std::result::Result<T, SError>;
@@ -204,6 +207,7 @@ pub(crate) enum Backend {
         server_name: rustls_jls::pki_types::ServerName<'static>,
         connector: tokio_rustls_jls::TlsConnector,
     },
+    Quic(Arc<quic::DoqClient>),
     FakeIp(Arc<FakeIp>),
     System,
 }
@@ -233,38 +237,6 @@ impl Drop for DnsServer {
             task.abort();
         }
     }
-}
-
-fn tls_connector() -> Result<tokio_rustls_jls::TlsConnector> {
-    let roots =
-        rustls_jls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let provider = rustls_jls::crypto::CryptoProvider::get_default()
-        .cloned()
-        .or_else(|| {
-            #[cfg(feature = "ring")]
-            {
-                return Some(Arc::new(rustls_jls::crypto::ring::default_provider()));
-            }
-            #[cfg(all(not(feature = "ring"), feature = "aws-lc-rs"))]
-            {
-                return Some(Arc::new(rustls_jls::crypto::aws_lc_rs::default_provider()));
-            }
-            #[allow(unreachable_code)]
-            None
-        })
-        .ok_or_else(|| {
-            SError::InvalidConfig(
-                "DNS TLS requires a rustls crypto provider (ring or aws-lc-rs)".into(),
-            )
-        })?;
-    let mut config = rustls_jls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(dns_error)?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    // DNS uses ordinary TLS with certificate verification, not JLS authentication.
-    config.jls_config.enable = false;
-    Ok(tokio_rustls_jls::TlsConnector::from(Arc::new(config)))
 }
 
 impl DnsServer {
@@ -437,7 +409,7 @@ impl Resolver {
             Backend::Udp(upstream) | Backend::Tcp(upstream) | Backend::Tls { upstream, .. } => {
                 *upstream
             }
-            Backend::FakeIp(_) | Backend::System => {
+            Backend::Quic(_) | Backend::FakeIp(_) | Backend::System => {
                 return Err(dns_error("local resolver has no upstream"));
             }
         };
@@ -484,16 +456,8 @@ impl Resolver {
             drop(send_query);
             Ok(reply.to_vec())
         } else {
-            let (stream, peer) = tokio::io::duplex(5000);
-            self.requests
-                .send(ProxyRequest::Tcp(TcpSession {
-                    stream: Box::new(peer),
-                    dst,
-                    src_addr: None,
-                    user_context,
-                }))
-                .await
-                .map_err(dns_error)?;
+            let (stream, request, _request_guard) = tcp_request(dst, user_context, 5000);
+            self.requests.send(request).await.map_err(dns_error)?;
             let mut stream: AnyTcp = if let Backend::Tls {
                 connector,
                 server_name,
@@ -571,6 +535,7 @@ impl DnsService for Resolver {
             match &self.backend {
                 Backend::System | Backend::FakeIp(_) => self.local(packet).await,
                 Backend::Tcp(_) | Backend::Tls { .. } => self.upstream(query, true).await,
+                Backend::Quic(client) => client.exchange(query, &self.requests).await,
                 Backend::Udp(_) => {
                     let reply = self.upstream(query, false).await?;
                     if Packet::parse(&reply)
@@ -595,9 +560,6 @@ impl DnsService for Resolver {
         Ok(reply)
     }
 }
-
-impl TcpTrait for tokio::io::DuplexStream {}
-impl TcpTrait for tokio_rustls_jls::client::TlsStream<tokio::io::DuplexStream> {}
 
 fn parse_query(bytes: &[u8]) -> Result<Packet<'_>> {
     let packet = Packet::parse(bytes).map_err(dns_error)?;

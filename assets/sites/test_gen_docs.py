@@ -1,11 +1,12 @@
-"""Regression checks for DNS configuration discovery and navigation."""
+"""Regression checks for configuration discovery and navigation."""
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
 
 from gen_docs import (
-    DNS_CONFIG_SRC, REPO_ROOT, Item, SourceAttrs, config_sources,
+    DNS_CONFIG_SRC, REPO_ROOT, Item, RenderContext, SourceAttrs, collect_default_fn_values,
+    config_sources, emit_struct_page,
     parse_container_serde, parse_field_serde, parse_source_attrs, plan_pages, render_nav,
 )
 
@@ -61,6 +62,78 @@ class DnsDocsTests(unittest.TestCase):
         server = parse_container_serde(attrs.container["DnsUdpServerCfg"])
         self.assertEqual(server.rename_all, "kebab-case")
         self.assertTrue(server.deny_unknown_fields)
+
+
+class TunDocsTests(unittest.TestCase):
+    def test_tun_defaults_render_as_values_from_public_helpers(self):
+        filename = "shadowquic/src/config/tun.rs"
+        fields = [
+            ("ipv4", {"resolved_path": {"path": "Ipv4Net"}}, "172.19.0.1/30"),
+            ("ipv6", {"resolved_path": {
+                "path": "Option", "args": {"angle_bracketed": {"args": [
+                    {"type": {"resolved_path": {"path": "Ipv6Net"}}},
+                ]}},
+            }}, "fdfe:dcba:9876::1/126"),
+            ("mtu", {"primitive": "u16"}, "1500"),
+            ("max_sessions", {"primitive": "usize"}, "1024"),
+            ("idle_timeout", {"primitive": "u64"}, "300"),
+        ]
+        config = Item(dict(
+            id=0, name="TunServerCfg", span=dict(filename=filename),
+            inner={"struct": {"kind": {"plain": {"fields": list(range(1, 6))}}}},
+        ))
+        index = {config.id: config}
+        for id, (name, ty, _) in enumerate(fields, start=1):
+            index[str(id)] = Item(dict(
+                id=id, name=name, span=dict(filename=filename), inner={"struct_field": ty},
+            ))
+        ctx = RenderContext(
+            index=index, page_for_type={}, pages_dir_for={},
+            default_values=collect_default_fn_values(REPO_ROOT),
+            src_attrs=parse_source_attrs(REPO_ROOT),
+        )
+        rendered = emit_struct_page(config, Path("configuration/inbound/tun.md"), "Tun server", ctx)
+        for name, _, expected in fields:
+            with self.subTest(field=name):
+                section = rendered.split(f"### `{name.replace('_', '-')}`\n", 1)[1].split("\n### ", 1)[0]
+                self.assertIn(f"- **Default:** `{expected}`", section)
+                self.assertNotIn("default_", section)
+                if name == "ipv6":
+                    self.assertIn("*(optional)*", section)
+
+
+class RestApiDocsTests(unittest.TestCase):
+    def index(self, include_api=True):
+        def item(id, name, inner):
+            return Item(dict(id=id, name=name, inner=inner,
+                             span=dict(filename="shadowquic/src/config/mod.rs")))
+
+        items = [
+            item(0, "Config", {"struct": {"kind": {"plain": {"fields": [3] if include_api else []}}}}),
+            item(1, "InboundCfg", {"enum": {"variants": []}}),
+            item(2, "OutboundCfg", {"enum": {"variants": []}}),
+            item(3, "restful_api", {"struct_field": {"resolved_path": {
+                "path": "Option", "id": 99, "args": {"angle_bracketed": {"args": [
+                    {"type": {"resolved_path": {"id": 4}}},
+                ]}},
+            }}}),
+            item(4, "ApiConfig", {"struct": {"kind": {"plain": {"fields": []}}}}),
+        ]
+        return {it.id: it for it in items}
+
+    def test_rest_api_has_dedicated_configuration_page_and_navigation(self):
+        pages = plan_pages(self.index(), SourceAttrs())
+        paths = {p.item_id: p.rel_path for p in pages}
+        self.assertEqual(paths[4], "configuration/restful-api.md")
+        nav = tomllib.loads(render_nav(pages))["nav"]
+        configuration = next(entry["Configuration"] for entry in nav if "Configuration" in entry)
+        self.assertIn({"REST API": "configuration/restful-api.md"}, configuration)
+        self.assertFalse(any(p.rel_path == "configuration/shared/apiconfig.md" for p in pages))
+
+    def test_unreachable_api_config_omits_page_and_navigation(self):
+        pages = plan_pages(self.index(include_api=False), SourceAttrs())
+        self.assertFalse(any(p.item_id == 4 for p in pages))
+        self.assertNotIn('"REST API"', render_nav(pages))
 
 
 if __name__ == "__main__":

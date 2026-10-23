@@ -1,23 +1,27 @@
 //! TCP/UDP proxying from a layer-3 TUN interface.
-mod config;
 mod packet;
 mod stack;
 #[cfg(test)]
 mod tests;
 
+pub use crate::config::TunServerCfg;
 use async_trait::async_trait;
 use bytes::Bytes;
-pub use config::TunServerCfg;
-use std::{io, sync::Mutex};
+use std::{
+    io,
+    sync::{Arc, Mutex},
+};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::Instrument;
 #[cfg(not(target_os = "android"))]
 use tun_rs::DeviceBuilder;
 
-use crate::{Inbound, ProxyRequest, error::SError};
+use crate::{Inbound, ProxyRequest, error::SError, observe::Observer};
 
 pub struct TunServer {
     pub name: String,
+    /// Shared with the manager's observer map when registering this inbound.
+    pub observer: Arc<Observer>,
     requests: mpsc::Receiver<ProxyRequest>,
     task: Mutex<Option<JoinHandle<Result<(), SError>>>>,
 }
@@ -29,8 +33,10 @@ impl TunServer {
         let (device, name) = {
             let mut builder = DeviceBuilder::new()
                 .ipv4(cfg.ipv4.addr(), cfg.ipv4.prefix_len(), None)
-                .ipv6(cfg.ipv6.addr(), cfg.ipv6.prefix_len())
                 .mtu(cfg.mtu);
+            if let Some(ipv6) = cfg.ipv6 {
+                builder = builder.ipv6(ipv6.addr(), ipv6.prefix_len());
+            }
             if let Some(name) = &cfg.name {
                 builder = builder.name(name);
             }
@@ -95,6 +101,7 @@ impl TunServer {
         );
         Ok(Self {
             name,
+            observer: Arc::new(Observer::new()),
             requests,
             task: Mutex::new(Some(task)),
         })
@@ -104,7 +111,17 @@ impl TunServer {
 #[async_trait]
 impl Inbound for TunServer {
     async fn accept(&mut self) -> Result<ProxyRequest, SError> {
-        self.requests.recv().await.ok_or(SError::InboundUnavailable)
+        let mut request = self
+            .requests
+            .recv()
+            .await
+            .ok_or(SError::InboundUnavailable)?;
+        request.user_context_mut().observer = Arc::downgrade(&self.observer);
+        request
+            .user_context_mut()
+            .stats
+            .get_or_insert_with(Default::default);
+        Ok(request)
     }
 
     async fn shutdown(&self) -> Result<(), SError> {

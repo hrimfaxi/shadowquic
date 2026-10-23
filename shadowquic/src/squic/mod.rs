@@ -82,8 +82,11 @@ pub struct SQConn<T: QuicConnection> {
     pub(crate) recv_id_store: IDStore<(AnyUdpSend, SocksAddr)>,
     /// Latest successful peer stats response and the time it was received.
     pub stats: Arc<Mutex<Option<SQConnStats>>>,
+    /// Serialize remote refreshes without blocking readers of the cached sample.
+    pub(crate) stats_refresh: Arc<Mutex<()>>,
 }
 
+#[derive(Clone)]
 pub struct SQConnStats {
     pub uplink: ConnStats,
     pub downlink: ConnStats,
@@ -984,6 +987,7 @@ mod udp_receive_tests {
             send_id_store: Default::default(),
             recv_id_store: store,
             stats: Default::default(),
+            stats_refresh: Default::default(),
         };
         let receiving = tokio::spawn(handle_udp_packet_recv(conn));
 
@@ -1034,6 +1038,7 @@ mod udp_receive_tests {
             send_id_store: Default::default(),
             recv_id_store: store.clone(),
             stats: Default::default(),
+            stats_refresh: Default::default(),
         };
         let receiving = tokio::spawn(handle_udp_packet_recv(conn));
 
@@ -1250,6 +1255,7 @@ mod udp_receive_tests {
             send_id_store: Default::default(),
             recv_id_store: store(),
             stats: Default::default(),
+            stats_refresh: Default::default(),
         };
 
         // A connection that is gone is what ends the receive loop.
@@ -1402,6 +1408,7 @@ mod udp_receive_tests {
             send_id_store: Default::default(),
             recv_id_store: store.clone(),
             stats: Default::default(),
+            stats_refresh: Default::default(),
         };
         let receiving = tokio::spawn(handle_udp_packet_recv(conn));
 
