@@ -1,12 +1,13 @@
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
 
 use bytes::BytesMut;
 use tokio::{
-    net::{TcpSocket, TcpStream, lookup_host},
+    io::AsyncReadExt,
+    net::{TcpSocket, TcpStream},
     sync::Mutex,
 };
 use tracing::{Instrument, error, trace};
@@ -14,7 +15,7 @@ use tracing::{Instrument, error, trace};
 use crate::{
     Outbound, UdpSession,
     config::{DirectOutCfg, DnsStrategy, Interface},
-    dns::{DnsService, ResolverManager},
+    dns::{DnsService, ResolverManager, resolve_destination},
     error::SError,
     msgs::socks5::{AddrOrDomain, SocksAddr},
     utils::{
@@ -24,10 +25,25 @@ use crate::{
 };
 use async_trait::async_trait;
 
+#[cfg(all(test, feature = "shadowquic-quinn"))]
+#[path = "udp_failure_tests.rs"]
+mod udp_failure_tests;
+
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "tproxy",
+    feature = "shadowquic-quinn",
+    feature = "dns-server",
+    feature = "statistics"
+))]
+#[path = "tproxy_udp_failure_tests.rs"]
+mod tproxy_udp_failure_tests;
+
 #[derive(Clone)]
 pub struct DirectOut {
     pub cfg: DirectOutCfg,
-    pub(crate) addr_resolver: Arc<dyn DnsService>,
+    pub(crate) dns: Arc<dyn DnsService>,
 }
 
 impl std::fmt::Debug for DirectOut {
@@ -50,11 +66,13 @@ impl Outbound for DirectOut {
 
         match req {
             crate::ProxyRequest::Tcp(mut tcp_session) => {
+                let dns = self.dns.clone();
                 let fut = async move {
                     trace!("direct tcp to {}", tcp_session.dst);
-                    let dst = tcp_session.dst.to_socket_addrs()?;
-                    let dst = apply_dns_strategy(dst, &dns_strategy)
-                        .ok_or(SError::DomainResolveFailed(tcp_session.dst.to_string()))?;
+                    // If dns field is resolved, Direct outbound will be wrapped with ResolvingOutbound.
+                    // Here is mainly for backward compatibilty if dns-servers feature is disabled.
+                    let dst =
+                        resolve_destination(&*dns, &tcp_session.dst, Some(&dns_strategy)).await?;
                     trace!("resolved to {}", dst);
 
                     let mut upstream = self_clone.connect_tcp(dst).await?;
@@ -95,24 +113,28 @@ impl Outbound for DirectOut {
     }
 }
 
-#[derive(Default, Clone)]
-struct DnsResolve(Arc<Mutex<HashMap<SocksAddr, SocketAddr>>>);
+#[derive(Clone)]
+struct DnsResolve(
+    Arc<Mutex<HashMap<SocksAddr, SocketAddr>>>,
+    Arc<dyn DnsService>,
+);
 impl DnsResolve {
     async fn resolve(
         &self,
-        socks: SocksAddr,
+        socks: &SocksAddr,
         strategy: &DnsStrategy,
     ) -> Result<SocketAddr, SError> {
-        if let AddrOrDomain::Domain(_) = &socks.addr {
-            if let Some(v) = self.0.lock().await.get(&socks) {
+        if let AddrOrDomain::Domain(_) = socks.addr {
+            if let Some(v) = self.0.lock().await.get(socks) {
                 Ok(*v)
             } else {
-                let s = resolve(&socks, strategy).await?;
-                self.0.lock().await.insert(socks, s);
+                let s = resolve_destination(&*self.1, socks, Some(strategy)).await?;
+                tracing::trace!("{} resolved to {}", socks, s);
+                self.0.lock().await.insert(socks.clone(), s);
                 Ok(s)
             }
         } else {
-            Ok(resolve(&socks, strategy).await?)
+            Ok(resolve_destination(&*self.1, socks, Some(strategy)).await?)
         }
     }
     async fn inv_resolve(&self, addr: &SocketAddr) -> SocksAddr {
@@ -124,39 +146,19 @@ impl DnsResolve {
     }
 }
 
-async fn resolve(socks: &SocksAddr, strategy: &DnsStrategy) -> Result<SocketAddr, SError> {
-    let mut s = match socks.addr.clone() {
-        crate::msgs::socks5::AddrOrDomain::V4(x) => {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::from(x)), 0)
-        }
-        crate::msgs::socks5::AddrOrDomain::V6(x) => {
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::from(x)), 0)
-        }
-        crate::msgs::socks5::AddrOrDomain::Domain(var_vec) => {
-            let ip_list = lookup_host((
-                String::from_utf8(var_vec.contents)
-                    .map_err(|_| SError::DomainResolveFailed(socks.to_string()))?,
-                socks.port,
-            ))
-            .await?;
-            apply_dns_strategy(ip_list, strategy)
-                .ok_or(SError::DomainResolveFailed(socks.to_string()))?
-        }
-    };
-    s.set_port(socks.port);
-    Ok(s)
-}
-
 impl DirectOut {
     pub fn new(cfg: DirectOutCfg, resolver_manager: Arc<ResolverManager>) -> Self {
         #[cfg(feature = "dns-server")]
-        let tag = crate::dns::DEFAULT_SYSTEM_DNS_TAG;
+        let tag = cfg
+            .dns
+            .as_deref()
+            .unwrap_or(crate::dns::DEFAULT_SYSTEM_DNS_TAG);
         #[cfg(not(feature = "dns-server"))]
         let tag = "";
-        let addr_resolver = resolver_manager
+        let dns = resolver_manager
             .resolver(tag)
             .expect("default system resolver exists");
-        Self { cfg, addr_resolver }
+        Self { cfg, dns }
     }
 
     async fn connect_tcp(&self, dst: SocketAddr) -> Result<TcpStream, SError> {
@@ -165,7 +167,7 @@ impl DirectOut {
             interface: self.cfg.socket_opt.bind_interface.clone(),
             fw_mark: self.cfg.socket_opt.fw_mark,
             protect_path: None,
-            resolver: self.addr_resolver.clone(),
+            resolver: self.dns.clone(),
         }
         .create_socket()
         .await?;
@@ -185,7 +187,7 @@ impl DirectOut {
             fw_mark: self.cfg.socket_opt.fw_mark,
             protect_path: None,
             try_dual_stack: bind_addr.ip().is_unspecified(),
-            resolver: self.addr_resolver.clone(),
+            resolver: self.dns.clone(),
         }
         .create_socket()
         .await?;
@@ -207,7 +209,7 @@ impl DirectOut {
         let upstream_clone = upstream.clone();
         let mut downstream = udp_session.recv;
 
-        let dns_cache = DnsResolve::default();
+        let dns_cache = DnsResolve(Default::default(), self.dns.clone());
         let dns_cache_clone = dns_cache.clone();
         let dns_strategy = self.cfg.dns_strategy.clone();
         let fut1 = async move {
@@ -231,7 +233,7 @@ impl DirectOut {
                 let (buf, dst) = downstream.recv_from().await?;
 
                 //trace!("udp request to:{}", dst);
-                let dst = dns_cache.resolve(dst, &dns_strategy).await?;
+                let dst = dns_cache.resolve(&dst, &dns_strategy).await?;
                 //trace!("udp resolve to:{}", dst);
                 let _siz = upstream_clone.send_to(&buf, &dst).await?;
                 //trace!("udp request sent:{}bytes", siz);
@@ -239,57 +241,33 @@ impl DirectOut {
             #[allow(unreachable_code)]
             (Ok(()) as Result<(), SError>)
         };
+        let fut3 = async {
+            let Some(mut s) = udp_session.stream else {
+                return Ok(());
+            };
+            let mut buf = [0u8];
+            s.read_exact(&mut buf).await?;
+            Err(SError::UDPSessionClosed(
+                "udp session closed by control stream".into(),
+            ))
+        };
         // We can use spawn, but it requirs communication to shutdown the other
         // Flatten spawn handle using try_join! doesn't work. Don't know why
-        tokio::try_join!(fut1, fut2)?;
+        tokio::try_join!(fut1, fut2, fut3)?;
         Ok(())
     }
 }
-pub(crate) fn apply_dns_strategy<It>(mut ip_list: It, strategy: &DnsStrategy) -> Option<SocketAddr>
-where
-    It: Iterator<Item = SocketAddr>,
-{
-    match strategy {
-        DnsStrategy::Ipv4Only => ip_list.find(|addr| addr.is_ipv4()),
-        DnsStrategy::Ipv6Only => ip_list.find(|addr| addr.is_ipv6()),
-        DnsStrategy::PreferIpv4 => {
-            let mut first = None;
-            for ip in ip_list {
-                if ip.is_ipv4() {
-                    return Some(ip);
-                }
-                if first.is_none() {
-                    first = Some(ip);
-                }
-            }
-            first
-        }
-        DnsStrategy::PreferIpv6 => {
-            let mut first = None;
-            for ip in ip_list {
-                if ip.is_ipv6() {
-                    return Some(ip);
-                }
-                if first.is_none() {
-                    first = Some(ip);
-                }
-            }
-            first
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[tokio::test]
     async fn udp_domain_cache_preserves_each_destination_port() {
-        let cache = DnsResolve::default();
+        let cache = DnsResolve(Default::default(), DirectOut::default().dns);
         for port in [1234, 5678, 1234] {
             let domain = SocksAddr::from_domain("localhost".into(), port);
             let resolved = cache
-                .resolve(domain.clone(), &DnsStrategy::Ipv4Only)
+                .resolve(&domain, &DnsStrategy::Ipv4Only)
                 .await
                 .unwrap();
             assert_eq!(resolved.port(), port);
@@ -301,6 +279,7 @@ mod test {
     #[cfg(target_os = "linux")]
     async fn tcp_and_udp_use_configured_source_address() {
         use crate::config::{Interface, SocketOpt};
+        use std::net::IpAddr;
         use tokio::net::{TcpListener, UdpSocket};
         use tokio::time::{Duration, timeout};
 
@@ -377,49 +356,5 @@ mod test {
         })
         .await
         .unwrap();
-    }
-
-    fn make_addrs() -> Vec<SocketAddr> {
-        vec![
-            // 127.0.0.1:8080 (IPv4)
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080),
-            // ::1:8080 (IPv6)
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080),
-        ]
-    }
-
-    #[test]
-    fn test_apply_dns_strategy_ipv4_only() {
-        let addrs = make_addrs();
-        let result = apply_dns_strategy(addrs.clone().into_iter(), &DnsStrategy::Ipv4Only);
-        assert_eq!(result, Some(addrs[0]));
-    }
-
-    #[test]
-    fn test_apply_dns_strategy_ipv6_only() {
-        let addrs = make_addrs();
-        let result = apply_dns_strategy(addrs.clone().into_iter(), &DnsStrategy::Ipv6Only);
-        assert_eq!(result, Some(addrs[1]));
-    }
-
-    #[test]
-    fn test_apply_dns_strategy_prefer_ipv4() {
-        let addrs = make_addrs();
-        let result = apply_dns_strategy(addrs.clone().into_iter(), &DnsStrategy::PreferIpv4);
-        assert_eq!(result, Some(addrs[0]));
-    }
-
-    #[test]
-    fn test_apply_dns_strategy_prefer_ipv6() {
-        let addrs = make_addrs();
-        let result = apply_dns_strategy(addrs.clone().into_iter(), &DnsStrategy::PreferIpv6);
-        assert_eq!(result, Some(addrs[1]));
-    }
-
-    #[test]
-    fn test_apply_dns_strategy_empty() {
-        let addrs: Vec<SocketAddr> = vec![];
-        let result = apply_dns_strategy(addrs.into_iter(), &DnsStrategy::PreferIpv4);
-        assert_eq!(result, None);
     }
 }

@@ -14,7 +14,7 @@ default = ["shadowquic-quinn", "sunnyquic-noq", "ring", "statistics", "tproxy", 
 dns-server = ["dep:ipnet", "dep:quick_cache", "dep:simple-dns", "dep:tokio-rustls-jls", "dep:rustls_jls", "dep:quinn"]
 # cost 200k
 statistics = []
-restful-api = ["statistics", "dep:hyper", "hyper/server", "dep:hyper-util", "dep:http-body-util", "dep:serde_json", "dep:url", "dep:percent-encoding", "dep:subtle", "time/formatting"]
+restful-api = ["statistics", "dep:hyper", "hyper/server", "dep:hyper-util", "dep:http-body-util", "dep:serde_json", "dep:url", "dep:percent-encoding", "dep:subtle", "time/formatting", "tokio/fs", "dep:tokio-rustls-jls", "dep:rustls_jls", "tokio-rustls-jls/tls12", "dep:tempfile"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys"]
 mem-profile = ["restful-api", "jemalloc", "tikv-jemalloc-sys/profiling", "dep:tempfile"]
 # cost 200k
@@ -77,10 +77,8 @@ tokio = {version = "1.52.3", features = ["io-util", "net","rt","macros","rt-mult
 tracing = "0.1.44"
 time = { version = "0.3.47", features = ["macros", "local-offset"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "ansi", "time", "local-time"]}
-quinn = { package = "quinn-jls", version = "0.3.8", default-features = false, features = ["runtime-tokio"], optional = true}
-quinn_proto = { package = "quinn-proto-jls", version = "0.3.8", default-features = false, optional = true}
-#quinn = { package = "quinn", git = "https://github.com/spongebob888/quinn-jls", branch = "jls-dev", default-features = false, features = ["runtime-tokio"], optional = true}
-#quinn_proto = { package = "quinn-proto", git = "https://github.com/spongebob888/quinn-jls", branch = "jls-dev", default-features = false, optional = true}
+quinn = { package = "quinn-jls", version = "0.4.0", default-features = false, features = ["runtime-tokio"], optional = true}
+quinn_proto = { package = "quinn-proto-jls", version = "0.4.0", default-features = false, optional = true}
 
 #brutal-core = { git = "https://github.com/hrimfaxi/brutal_quinn.git", branch = "master" }
 brutal-core = { version = "0.1.0" }
@@ -89,7 +87,7 @@ rustls_jls = { package = "rustls-jls", version = "1.3.7", default-features = fal
 rcgen = { version = "0.14", default-features = false, features = ["crypto"] }
 bytes = "1.11.0"
 async-trait = "0.1.89"
-webpki-roots = "1.0.7"
+webpki-roots = "1.0.11"
 shadowquic-macros = { path = "../shadowquic-macros", version = ">=0.3.11" }
 yaml-rust2 = "0.13.0"
 serde = { version = "1.0.228", features = ["derive"]}

@@ -2,12 +2,14 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use tokio::sync::mpsc::error::TrySendError;
 use tracing::Instrument;
 
 use crate::config::TproxyServerCfg;
 use crate::error::SError;
 use crate::msgs::socks5::{AddrOrDomain, SocksAddr};
 use crate::observe::Observer;
+use crate::utils::dual_socket::ToCanonical;
 use crate::{
     AnyTcp, AnyUdpRecv, AnyUdpSend, Inbound, ProxyRequest, TcpSession, UdpRecv, UdpSend, UdpSession,
 };
@@ -328,7 +330,6 @@ async fn handle_udp_tproxy(
                         let client_addr = meta.addr.to_canonical();
                         let now = std::time::Instant::now();
 
-                        sessions.retain(|_, (tx, _)| !tx.is_closed());
 
                         let tx = if let Some((tx, last_active)) = sessions.get_mut(&client_addr) {
                             *last_active = now;
@@ -380,9 +381,17 @@ async fn handle_udp_tproxy(
                         };
                         for packet in udp_gro_packets(data, meta.stride) {
                             let data = Bytes::copy_from_slice(packet);
-                            if tx.send((data, dst_socks.clone())).await.is_err() {
-                                break;
+                            match tx.try_send((data, dst_socks.clone())) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    tracing::warn!(dst = %dst_socks,"udp packet queue full and dropped");
+                                }
+                                Err(TrySendError::Closed(_)) => {
+                                    sessions.remove(&client_addr);
+                                    break;
+                                }
                             }
+
                         }
                     }
                     Err(error) => {
@@ -648,25 +657,6 @@ fn set_socket_option(socket: &Socket, level: i32, opt: i32, val: i32) -> io::Res
         return Err(io::Error::last_os_error());
     }
     Ok(())
-}
-
-trait ToCanonical {
-    fn to_canonical(&self) -> Self;
-}
-
-impl ToCanonical for SocketAddr {
-    fn to_canonical(&self) -> Self {
-        match self {
-            SocketAddr::V4(_) => *self,
-            SocketAddr::V6(addr) => {
-                if let Some(v4) = addr.ip().to_ipv4_mapped() {
-                    SocketAddr::new(std::net::IpAddr::V4(v4), addr.port())
-                } else {
-                    *self
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

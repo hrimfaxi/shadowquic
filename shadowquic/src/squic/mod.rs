@@ -572,9 +572,8 @@ pub async fn handle_udp_send<C: QuicConnection>(
             ctl_header.encode(&mut send).await?;
         }
         {
-            let mut content = BytesMut::with_capacity(2000);
             let mut head = Vec::<u8>::new();
-            dg_header.clone().encode(&mut head).await?;
+            dg_header.encode(&mut head).await?;
 
             if over_stream {
                 // Must be opened and inserted.
@@ -587,6 +586,7 @@ pub async fn handle_udp_send<C: QuicConnection>(
                 conn.write_all(&head).await?;
                 conn.write_all(&bytes).await?;
             } else {
+                let mut content = BytesMut::with_capacity(2000);
                 content.put(Bytes::from(head));
                 content.put(bytes);
                 let content = content.freeze();
