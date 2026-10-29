@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell, SetOnce};
-use tracing::Instrument;
+use tracing::{Instrument, instrument};
 
 use super::quinn_wrapper::EndClient;
 use tracing::{error, info};
@@ -194,8 +194,11 @@ impl UserManager for ShadowQuicClient {
 
 #[async_trait]
 impl Outbound for ShadowQuicClient {
+    #[instrument(name = "outbound", skip_all, fields(tag = %self.config.tag))]
     async fn handle(&self, req: crate::ProxyRequest) -> Result<(), crate::error::SError> {
-        let conn = self.prepare_conn().await?;
+        let conn = tokio::time::timeout(std::time::Duration::from_secs(10), self.prepare_conn())
+            .await
+            .map_err(std::io::Error::from)??;
 
         let over_stream = self.config.over_stream;
         match outbound::dispatch(req, conn, over_stream, self.config.half_close_timeout).await? {

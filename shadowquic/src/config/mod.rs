@@ -819,7 +819,7 @@ impl OutboundCfg {
                 outbound
             }
             OutboundCfg::Direct(cfg) => Arc::new(DirectOut::new(cfg, resolver_manager)),
-            OutboundCfg::Drop(_) => Arc::new(DropOutbound),
+            OutboundCfg::Drop(cfg) => Arc::new(DropOutbound { tag: cfg.tag }),
             OutboundCfg::Selector(_) => {
                 return Err(SError::InvalidConfig(
                     "selectors must be built after their member outbounds".into(),
@@ -1105,10 +1105,18 @@ impl PartialEq for CongestionControl {
 /// dns-strategy: prefer-ipv4 # or prefer-ipv6, ipv4-only, ipv6-only
 /// bind-interface: "127.0.0.1:0" # optional, by IP address or interface name
 /// fw-mark: 1234 # optional, Linux fwmark
+/// tcp-keep-alive: false # optional, enable TCP keepalive using OS probe timings
 /// ```
+/// Set `tcp-keep-alive: true` to enable kernel keepalive probes on direct
+/// upstream TCP connections. Probe delay, interval, and retry count use the
+/// operating system's settings.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct DirectOutCfg {
+    /// Enable TCP keepalive on upstream sockets using the OS probe timings.
+    /// Defaults to false.
+    #[serde(default)]
+    pub tcp_keep_alive: bool,
     /// Inactivity timeout after either TCP source reaches EOF, in milliseconds.
     /// Defaults to 60 seconds. Zero disables the timeout.
     #[serde(default = "default_half_close_timeout")]
@@ -1156,6 +1164,7 @@ pub fn default_inbound_send_window() -> Option<u64> {
 impl Default for DirectOutCfg {
     fn default() -> Self {
         Self {
+            tcp_keep_alive: false,
             half_close_timeout: default_half_close_timeout(),
             #[cfg(feature = "dns-server")]
             dns: None,

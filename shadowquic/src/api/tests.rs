@@ -31,9 +31,7 @@ impl Outbound for FixtureOutbound {
         assert!(session.user_context.observer.upgrade().is_none());
         self.calls.fetch_add(1, Ordering::Relaxed);
         let mut upstream = TcpStream::connect(self.destination).await?;
-        tokio::spawn(async move {
-            let _ = tokio::io::copy_bidirectional(&mut session.stream, &mut upstream).await;
-        });
+        tokio::io::copy_bidirectional(&mut session.stream, &mut upstream).await?;
         Ok(())
     }
 }
@@ -511,6 +509,33 @@ async fn tokio_metric_reports_multi_thread_runtime() {
 }
 
 #[tokio::test]
+async fn probe_drives_blocking_direct_outbound_and_closes_session_after_response() {
+    let (target, mut requests, fixture_task) = fixture().await;
+    let _fixture = AbortOnDrop(fixture_task);
+    let outbound = crate::direct::outbound::DirectOut::default();
+    let url = url::Url::parse(&format!("http://{target}/health?q=probe")).unwrap();
+    let respond = async {
+        let (request, mut peer) = requests.recv().await.unwrap();
+        assert!(request.starts_with("GET /health?q=probe HTTP/1.1\r\n"));
+        peer.write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+            .await
+            .unwrap();
+        // Keep the server side open: the probe must finish and close its relay
+        // after receiving the response, without waiting for an upstream EOF.
+        assert_eq!(peer.read(&mut [0]).await.unwrap(), 0);
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let (result, ()) = tokio::join!(
+            probe_http_outbound(&url, &outbound, Duration::from_secs(1)),
+            respond
+        );
+        result.unwrap_or_else(|error| panic!("HTTP probe failed: {}", error.body.message));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn probes_preserve_http_target_cache_results_and_release_connections() {
     let (target, mut requests, fixture_task) = fixture().await;
     let outbound = Arc::new(FixtureOutbound {
@@ -578,7 +603,7 @@ async fn probes_preserve_http_target_cache_results_and_release_connections() {
     assert_eq!(result["status"], "failed");
     assert!(result["latency_ms"].is_null());
     assert_eq!(outbound.calls.load(Ordering::Relaxed), 2);
-    assert_eq!(api.get_connections().await, json!({"connections": []}));
+    assert_eq!(connections_json(&api).await, json!({"connections": []}));
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
     fixture_task.abort();
@@ -790,11 +815,11 @@ async fn selector_api_lists_switches_and_rejects_invalid_updates() {
     let mut outbounds: HashMap<String, Arc<dyn Outbound>> = HashMap::from([
         (
             "a".into(),
-            Arc::new(crate::drop_outbound::DropOutbound) as Arc<dyn Outbound>,
+            Arc::new(crate::drop_outbound::DropOutbound::default()) as Arc<dyn Outbound>,
         ),
         (
             "b".into(),
-            Arc::new(crate::drop_outbound::DropOutbound) as Arc<dyn Outbound>,
+            Arc::new(crate::drop_outbound::DropOutbound::default()) as Arc<dyn Outbound>,
         ),
     ]);
     let selector = Arc::new(
@@ -949,6 +974,88 @@ fn tcp_request(dst: SocksAddr) -> (ProxyRequest, tokio::io::DuplexStream) {
     )
 }
 
+async fn connections_json(api: &ApiManager) -> Value {
+    let response = response(StatusCode::OK, api.get_connections().await);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn connections_http_response_preserves_schema_and_string_id_order_for_many_sessions() {
+    let observer = Arc::new(Observer::new());
+    let inbound = "local\"\\\n";
+    let outbound = "chosen\"\\\n";
+    let api = Arc::new(ApiManager::new(
+        None,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::from([(inbound.into(), observer.clone())]),
+        #[cfg(feature = "dns-server")]
+        None,
+    ));
+    let (expired, _peer) = tcp_request(SocksAddr::from_domain("expired.test".into(), 80));
+    drop(observer.wrap_request(expired, outbound.into()).await);
+
+    let mut sessions = Vec::new();
+    let mut expected = Vec::new();
+    for index in 0..1024 {
+        let (dst, dst_ip, dst_domain) = match index % 3 {
+            0 => (
+                "192.0.2.1:443".parse::<SocketAddr>().unwrap().into(),
+                Some("192.0.2.1"),
+                None,
+            ),
+            1 => (
+                "[2001:db8::1]:443".parse::<SocketAddr>().unwrap().into(),
+                Some("2001:db8::1"),
+                None,
+            ),
+            _ => (
+                SocksAddr::from_domain("destination.test".into(), 443),
+                None,
+                Some("destination.test"),
+            ),
+        };
+        let (request, peer) = tcp_request(dst);
+        sessions.push((observer.wrap_request(request, outbound.into()).await, peer));
+        let id = observer
+            .tcp_scoreboard
+            .lock()
+            .await
+            .last()
+            .unwrap()
+            .1
+            .upgrade()
+            .unwrap()
+            .id;
+        expected.push(json!({
+            "id": id.to_string(), "protocol": "tcp", "inbound": inbound,
+            "half_closed": false, "outbound": outbound, "src": "[::1]:1234",
+            "dst_ip": dst_ip, "dst_domain": dst_domain, "dst_port": 443,
+            "upload_bytes": 0, "download_bytes": 0,
+            "duration_ms": 0, "first_response_ms": null,
+        }));
+    }
+    expected.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let (addr, stop, task) = server(api).await;
+    let (status, mut snapshot) = call(addr, "GET", "/api/v1/connections", "").await;
+    assert_eq!(status, 200);
+    for entry in snapshot["connections"].as_array_mut().unwrap() {
+        assert!(entry["duration_ms"].is_u64());
+        entry["duration_ms"] = json!(0);
+    }
+    assert_eq!(snapshot, json!({"connections": expected}));
+
+    drop(sessions);
+    assert_eq!(
+        call(addr, "GET", "/api/v1/connections", "").await,
+        (200, json!({"connections": []})),
+    );
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn traffic_sums_named_and_anonymous_users_and_follows_user_counter_changes() {
     struct Connection;
@@ -1096,7 +1203,7 @@ async fn snapshots_report_active_sessions_and_preserve_udp_half_metadata() {
         .unwrap()
         .created;
     let elapsed_before = millis(created.elapsed());
-    let before = api.get_connections().await;
+    let before = connections_json(&api).await;
     let initial = &before["connections"][0];
     assert_eq!(initial["protocol"], "tcp");
     assert_eq!(initial["src"], "[::1]:1234");
@@ -1114,7 +1221,7 @@ async fn snapshots_report_active_sessions_and_preserve_udp_half_metadata() {
     peer.write_all(b"upload").await.unwrap();
     tcp.stream.read_exact(&mut [0; 6]).await.unwrap();
     tcp.stream.write_all(b"reply").await.unwrap();
-    let after = api.get_connections().await;
+    let after = connections_json(&api).await;
     assert_eq!(after["connections"][0]["id"], initial["id"]);
     assert_eq!(after["connections"][0]["upload_bytes"], 6);
     assert_eq!(after["connections"][0]["download_bytes"], 5);
@@ -1123,13 +1230,13 @@ async fn snapshots_report_active_sessions_and_preserve_udp_half_metadata() {
     // Liveness and half-close status follow the scoreboard's weak pointers.
     let held_metadata = observer.tcp_scoreboard.lock().await[0].1.upgrade().unwrap();
     drop(tcp);
-    let snapshot = api.get_connections().await;
+    let snapshot = connections_json(&api).await;
     assert_eq!(snapshot["connections"][0]["id"], initial["id"]);
     assert_eq!(snapshot["connections"][0]["half_closed"], true);
     assert!(snapshot["connections"][0]["download_bytes"].is_null());
     assert_eq!(api.get_traffic().await["inbounds"][1]["tcp_conns"], 1);
     drop(held_metadata);
-    assert_eq!(api.get_connections().await, json!({"connections": []}));
+    assert_eq!(connections_json(&api).await, json!({"connections": []}));
     assert_eq!(api.get_traffic().await["inbounds"][1]["tcp_conns"], 0);
 
     let (send_request, recv_request) = mpsc::channel(1);
@@ -1157,12 +1264,12 @@ async fn snapshots_report_active_sessions_and_preserve_udp_half_metadata() {
         .await
         .unwrap();
     recv_reply.recv().await.unwrap();
-    let before = api.get_connections().await;
+    let before = connections_json(&api).await;
     assert_eq!(before["connections"][0]["half_closed"], false);
     assert_eq!(before["connections"][0]["upload_bytes"], 7);
     let send = udp.send.clone();
     drop(udp);
-    let snapshot = api.get_connections().await;
+    let snapshot = connections_json(&api).await;
     let session = &snapshot["connections"][0];
     assert_eq!(session["protocol"], "udp");
     assert_eq!(session["id"], before["connections"][0]["id"]);
@@ -1184,7 +1291,7 @@ async fn snapshots_report_active_sessions_and_preserve_udp_half_metadata() {
         ]})
     );
     drop(send);
-    assert_eq!(api.get_connections().await, json!({"connections": []}));
+    assert_eq!(connections_json(&api).await, json!({"connections": []}));
     assert_eq!(api.get_traffic().await["inbounds"][1]["udp_conns"], 0);
     let traffic = api.get_traffic().await;
     assert_eq!(traffic["inbounds"][1]["tcp_download_bytes"], 5);
@@ -1218,7 +1325,7 @@ async fn connections_report_half_closed_when_only_udp_receiver_remains() {
     let ProxyRequest::Udp(udp) = observer.wrap_request(request, "chosen".into()).await else {
         unreachable!()
     };
-    let before = api.get_connections().await;
+    let before = connections_json(&api).await;
     assert_eq!(before["connections"][0]["half_closed"], false);
     let mut receiver = udp.recv;
     drop(udp.send);
@@ -1226,7 +1333,7 @@ async fn connections_report_half_closed_when_only_udp_receiver_remains() {
         .await
         .unwrap();
     receiver.recv_from().await.unwrap();
-    let after = api.get_connections().await;
+    let after = connections_json(&api).await;
     let session = &after["connections"][0];
     assert_eq!(session["id"], before["connections"][0]["id"]);
     assert!(
@@ -1248,7 +1355,7 @@ async fn connections_report_half_closed_when_only_udp_receiver_remains() {
     }
     assert_eq!(api.get_traffic().await["inbounds"][0]["udp_conns"], 1);
     drop(receiver);
-    assert_eq!(api.get_connections().await, json!({"connections": []}));
+    assert_eq!(connections_json(&api).await, json!({"connections": []}));
     assert_eq!(api.get_traffic().await["inbounds"][0]["udp_conns"], 0);
 }
 
@@ -1271,7 +1378,7 @@ async fn invalid_and_unsupported_probe_requests_leave_cached_results_unchanged()
             ("proxy".into(), outbound.clone() as Arc<dyn Outbound>),
             (
                 "drop".into(),
-                Arc::new(crate::drop_outbound::DropOutbound) as Arc<dyn Outbound>,
+                Arc::new(crate::drop_outbound::DropOutbound::default()) as Arc<dyn Outbound>,
             ),
             (
                 "unsupported".into(),
@@ -1379,7 +1486,11 @@ async fn connections_use_cached_domains_without_resolving_on_a_miss() {
         let mut dns = dns;
         let direct = crate::direct::outbound::DirectOut::default();
         while let Ok(request) = crate::Inbound::accept(&mut dns).await {
-            direct.handle(request).await.unwrap();
+            // The resolver closes the request channel after receiving its reply.
+            match direct.handle(request).await {
+                Ok(()) | Err(SError::OutboundUnavailable) => {}
+                Err(error) => panic!("DNS relay failed: {error}"),
+            }
         }
     }));
     tokio::time::timeout(Duration::from_secs(3), resolver.resolve("cached.test"))
@@ -1401,7 +1512,7 @@ async fn connections_use_cached_domains_without_resolving_on_a_miss() {
     let _hit = observer.wrap_request(hit, "chosen".into()).await;
     let (miss, _other_peer) = tcp_request("192.0.2.8:80".parse::<SocketAddr>().unwrap().into());
     let _miss = observer.wrap_request(miss, "chosen".into()).await;
-    let snapshot = tokio::time::timeout(Duration::from_millis(100), api.get_connections())
+    let snapshot = tokio::time::timeout(Duration::from_millis(100), connections_json(&api))
         .await
         .unwrap();
     let entries = snapshot["connections"].as_array().unwrap();

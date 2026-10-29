@@ -339,12 +339,14 @@ impl DnsService for DnsServer {
 }
 #[async_trait]
 impl Outbound for DnsServer {
+    #[instrument(name = "outbound", skip_all, fields(tag = %self.resolver.tag))]
     async fn handle(&self, req: ProxyRequest) -> Result<()> {
         self.resolver.handle(req).await
     }
 }
 #[async_trait]
 impl Outbound for Resolver {
+    #[instrument(name = "outbound", skip_all, fields(tag = %self.tag))]
     async fn handle(&self, req: ProxyRequest) -> Result<()> {
         if req.user_context().inbound_tag == self.tag {
             return Err(dns_error(
@@ -352,27 +354,25 @@ impl Outbound for Resolver {
             ));
         }
         let resolver = self.clone();
-        tokio::spawn(async move {
-            match req {
-                ProxyRequest::Tcp(mut session) => {
-                    resolver.serve_tcp(&mut session.stream).await;
-                }
-                ProxyRequest::Udp(mut session) => {
-                    while let Ok(Ok((query, dst))) =
-                        tokio::time::timeout(Duration::from_secs(60), session.recv.recv_from())
-                            .await
+
+        match req {
+            ProxyRequest::Tcp(mut session) => {
+                resolver.serve_tcp(&mut session.stream).await;
+            }
+            ProxyRequest::Udp(mut session) => {
+                while let Ok(Ok((query, dst))) =
+                    tokio::time::timeout(Duration::from_secs(60), session.recv.recv_from()).await
+                {
+                    // Preserve the intercepted destination as the response source.
+                    if let Ok(reply) = resolver.answer(&query).await
+                        && let Ok(reply) = udp_reply(&query, reply)
+                        && session.send.send_to(reply.into(), dst).await.is_err()
                     {
-                        // Preserve the intercepted destination as the response source.
-                        if let Ok(reply) = resolver.answer(&query).await
-                            && let Ok(reply) = udp_reply(&query, reply)
-                            && session.send.send_to(reply.into(), dst).await.is_err()
-                        {
-                            break;
-                        }
+                        break;
                     }
                 }
             }
-        });
+        }
         Ok(())
     }
 }
@@ -427,8 +427,8 @@ impl Resolver {
             ..UserContext::default()
         };
         if !tcp {
-            let (send_query, recv_query) = mpsc::channel(1);
-            let (send_reply, mut recv_reply) = mpsc::channel(1);
+            let (send_query, recv_query) = mpsc::channel(5);
+            let (send_reply, mut recv_reply) = mpsc::channel(5);
             send_query
                 .send((Bytes::copy_from_slice(query), dst.clone()))
                 .await
@@ -648,7 +648,7 @@ impl ResolverManager {
             Arc::new(Resolver {
                 tag: DEFAULT_SYSTEM_DNS_TAG.to_string(),
                 backend: Backend::System,
-                requests: mpsc::channel(1).0,
+                requests: mpsc::channel(5).0,
                 fake_ip: None,
                 cache: cache.clone(),
                 bypass_cache: false,

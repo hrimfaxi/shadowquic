@@ -118,7 +118,7 @@ pub async fn handle_request<C: QuicConnection>(
                 req.encode(&mut send).await?;
                 trace!(dst = %tcp_session.dst, "tcp connect req header sent");
 
-                let u = crate::utils::copy::copy_bidirectional(
+                let u: (u64, u64) = crate::utils::copy::copy_bidirectional(
                     &mut Unsplit { s: send, r: recv },
                     &mut tcp_session.stream,
                     8 * 1024,
@@ -133,12 +133,7 @@ pub async fn handle_request<C: QuicConnection>(
                 );
                 Ok(()) as Result<(), SError>
             };
-            tokio::spawn(
-                async {
-                    let _ = fut.await.map_err(|x| error!("{}", x));
-                }
-                .instrument(_span),
-            );
+            fut.await?;
         }
 
         crate::ProxyRequest::Udp(udp_session) => {
@@ -177,12 +172,7 @@ pub async fn handle_request<C: QuicConnection>(
                 info!("udp association to {} ended", udp_session.bind_addr.clone());
                 Ok(()) as Result<(), SError>
             };
-            tokio::spawn(
-                async {
-                    crate::utils::log_session_result(fut.await);
-                }
-                .instrument(_span),
-            );
+            fut.await?;
         }
     }
     Ok(())

@@ -2,7 +2,27 @@ use super::*;
 use crate::{Outbound, direct::outbound::DirectOut};
 use simple_dns::{CLASS, Name, Packet, PacketFlag, Question, TYPE};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::time::timeout;
+use tokio::{task::JoinSet, time::timeout};
+
+async fn relay_udp(request: ProxyRequest) {
+    // A routed UDP session ends when the client closes either channel.
+    match DirectOut::default().handle(request).await {
+        Ok(()) | Err(SError::OutboundUnavailable | SError::UDPSessionClosed(_)) => {}
+        Err(error) => panic!("UDP relay failed: {error}"),
+    }
+}
+
+async fn finish_relays(mut relays: JoinSet<()>) {
+    // Quinn retains its socket during the closing/draining period. A cancelled
+    // handshake can leave a longer PTO, especially on loaded Windows runners.
+    timeout(Duration::from_secs(10), async {
+        while let Some(result) = relays.join_next().await {
+            result.unwrap();
+        }
+    })
+    .await
+    .expect("UDP relays must stop after their clients are dropped");
+}
 
 fn query(id: u16) -> Vec<u8> {
     let mut packet = Packet::new_query(id);
@@ -92,6 +112,7 @@ fn route(
     let handled = count.clone();
     let upstream = client.upstream;
     let task = tokio::spawn(async move {
+        let mut relays = JoinSet::new();
         while let Some(request) = received.recv().await {
             assert!(matches!(request, ProxyRequest::Udp(_)));
             assert_eq!(request.dst().to_string(), upstream.to_string());
@@ -100,8 +121,9 @@ fn route(
             assert_eq!(questions[0].name, "doq.test");
             assert_eq!(questions[0].record_type, 1);
             handled.fetch_add(1, Ordering::SeqCst);
-            DirectOut::default().handle(request).await.unwrap();
+            relays.spawn(relay_udp(request));
         }
+        finish_relays(relays).await;
     });
     (requests, count, task)
 }
@@ -213,6 +235,7 @@ async fn doq_verifies_certificates_and_hostnames() {
             .is_err()
         );
         serving.await.unwrap();
+        drop(client);
         drop(requests);
         routing.await.unwrap();
     }
@@ -504,7 +527,7 @@ async fn doq_resumes_with_early_data_and_retries_rejected_early_queries() {
 
 #[tokio::test]
 async fn cancelled_handshake_preserves_endpoint_and_udp_source_port() {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(15), async {
         let (server, client) = fixture(true, "dns.test");
         let (requests, count, routing) = route(&client);
         let (arrived, arrival) = tokio::sync::oneshot::channel();
@@ -558,7 +581,7 @@ async fn closed_udp_relay_is_replaced_for_later_queries() {
             // Simulate an outbound which fails and drops the routed session.
             drop(received.recv().await.unwrap());
             let request = received.recv().await.unwrap();
-            DirectOut::default().handle(request).await.unwrap();
+            relay_udp(request).await;
             assert!(received.recv().await.is_none());
         });
         let serving = tokio::spawn(async move {
@@ -605,18 +628,21 @@ async fn alidns_reuses_cached_quic_connection() {
     let routed = sessions.clone();
     let (stop, mut stopped) = tokio::sync::oneshot::channel();
     let routing = tokio::spawn(async move {
+        let mut relays = JoinSet::new();
         loop {
             tokio::select! {
                 _ = &mut stopped => break,
+                Some(result) = relays.join_next() => result.unwrap(),
                 request = server.accept() => {
                     let request = request.unwrap();
                     assert!(matches!(request, ProxyRequest::Udp(_)));
                     assert_eq!(request.user_context().inbound_tag, "alidns");
                     routed.fetch_add(1, Ordering::SeqCst);
-                    DirectOut::default().handle(request).await.unwrap();
+                    relays.spawn(relay_udp(request));
                 }
             }
         }
+        relays.shutdown().await;
         server.shutdown().await.unwrap();
     });
 
@@ -688,10 +714,12 @@ async fn alidns_resumes_with_zero_rtt_attempt_and_fallback() {
         let sessions = Arc::new(AtomicUsize::new(0));
         let routed = sessions.clone();
         let routing = tokio::spawn(async move {
+            let mut relays = JoinSet::new();
             while let Some(request) = received.recv().await {
                 routed.fetch_add(1, Ordering::SeqCst);
-                DirectOut::default().handle(request).await.unwrap();
+                relays.spawn(relay_udp(request));
             }
+            finish_relays(relays).await;
         });
         let mut packet = Packet::new_query(123);
         packet.set_flags(PacketFlag::RECURSION_DESIRED);

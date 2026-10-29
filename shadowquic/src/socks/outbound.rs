@@ -17,7 +17,7 @@ use tokio::{
 };
 
 use async_trait::async_trait;
-use tracing::{Instrument, error, info_span};
+use tracing::{error, instrument};
 
 use crate::{
     Outbound, ProxyRequest,
@@ -45,8 +45,8 @@ impl std::fmt::Debug for SocksClient {
 
 #[async_trait]
 impl Outbound for SocksClient {
+    #[instrument(name = "outbound", skip_all, fields(tag = %self.cfg.tag))]
     async fn handle(&self, req: ProxyRequest) -> Result<(), SError> {
-        let span = info_span!("socks", server = self.cfg.addr);
         let client = self.clone();
         let fut = async move {
             match req {
@@ -54,8 +54,7 @@ impl Outbound for SocksClient {
                 ProxyRequest::Udp(udp_session) => client.handle_udp(udp_session).await,
             }
         };
-
-        tokio::spawn(async { crate::utils::log_session_result(fut.await) }.instrument(span));
+        fut.await?;
         Ok(())
     }
 }
@@ -74,6 +73,7 @@ impl SocksClient {
             .unwrap_or_else(|| panic!("dns resolver not found: {}", tag));
         let tcp_socket_factory = Arc::new(TcpSocketFactory {
             addr: cfg.addr.clone(),
+            keep_alive: false,
             interface: cfg.socket_opt.bind_interface.clone(),
             fw_mark: cfg.socket_opt.fw_mark,
             protect_path: None,

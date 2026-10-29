@@ -10,7 +10,7 @@ use tokio::{
     net::{TcpSocket, TcpStream},
     sync::Mutex,
 };
-use tracing::{Instrument, error, trace};
+use tracing::{instrument, trace};
 
 use crate::{
     Outbound, UdpSession,
@@ -60,6 +60,7 @@ impl Default for DirectOut {
 
 #[async_trait]
 impl Outbound for DirectOut {
+    #[instrument(name = "outbound", skip_all, fields(tag = %self.cfg.tag))]
     async fn handle(&self, req: crate::ProxyRequest) -> Result<(), crate::error::SError> {
         let dns_strategy = self.cfg.dns_strategy.clone();
         let self_clone = self.clone();
@@ -87,12 +88,7 @@ impl Outbound for DirectOut {
                     .await?;
                     Ok(()) as Result<(), SError>
                 };
-                tokio::spawn(
-                    async {
-                        let _ = fut.await.map_err(|x| error!("{}", x));
-                    }
-                    .in_current_span(),
-                );
+                fut.await?;
             }
 
             crate::ProxyRequest::Udp(udp_session) => {
@@ -100,12 +96,7 @@ impl Outbound for DirectOut {
                     self_clone.handle_udp(udp_session).await?;
                     Ok(()) as Result<(), SError>
                 };
-                tokio::spawn(
-                    async {
-                        crate::utils::log_session_result(fut.await);
-                    }
-                    .in_current_span(),
-                );
+                fut.await?;
             }
         }
 
@@ -164,6 +155,7 @@ impl DirectOut {
     async fn connect_tcp(&self, dst: SocketAddr) -> Result<TcpStream, SError> {
         let socket = TcpSocketFactory {
             addr: dst.to_string(),
+            keep_alive: self.cfg.tcp_keep_alive,
             interface: self.cfg.socket_opt.bind_interface.clone(),
             fw_mark: self.cfg.socket_opt.fw_mark,
             protect_path: None,
@@ -260,6 +252,37 @@ impl DirectOut {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[tokio::test]
+    async fn tcp_keep_alive_defaults_to_disabled_and_applies_to_connected_sockets() {
+        assert!(!DirectOutCfg::default().tcp_keep_alive);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        for (field, expected) in [
+            ("", false),
+            ("tcp-keep-alive: false", false),
+            ("tcp-keep-alive: true", true),
+        ] {
+            let crate::config::OutboundCfg::Direct(cfg) =
+                serde_saphyr::from_str(&format!("type: direct\ntag: direct\n{field}")).unwrap()
+            else {
+                panic!("expected direct outbound")
+            };
+            assert_eq!(cfg.tcp_keep_alive, expected);
+            let direct = DirectOut::new(cfg, Arc::new(ResolverManager::new()));
+            let stream = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                direct.connect_tcp(listener.local_addr().unwrap()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                socket2::SockRef::from(&stream).keepalive().unwrap(),
+                expected
+            );
+            listener.accept().await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn udp_domain_cache_preserves_each_destination_port() {
