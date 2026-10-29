@@ -398,7 +398,14 @@ impl RequestDispatcher {
         }
         tracing::debug!(outbound = %outbound_tag, dst = %req.dst(), "routing request");
         if let Err(error) = outbound.handle(req).await {
-            error!(outbound = %outbound_tag, %error, "error handling request");
+            // A peer that answers one datagram and closes its association ends
+            // the session normally; dns-udp opens one per query, so logging that
+            // at error level reports every successful query as a failure.
+            if error.is_session_end() {
+                tracing::debug!(outbound = %outbound_tag, %error, "session ended");
+            } else {
+                error!(outbound = %outbound_tag, %error, "error handling request");
+            }
         }
     }
 
