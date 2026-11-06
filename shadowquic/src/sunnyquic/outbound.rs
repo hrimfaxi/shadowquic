@@ -202,7 +202,9 @@ impl Outbound for SunnyQuicClient {
 
         let over_stream = self.config.over_stream;
         match outbound::dispatch(req, conn, over_stream, self.config.half_close_timeout).await? {
-            outbound::Dispatch::Sent => Ok(()),
+            // The relay runs here, in the task that accepted the request, so the
+            // session ends when this task is aborted with its inbound.
+            outbound::Dispatch::Sent(relay) => relay.await,
             outbound::Dispatch::Wedged => {
                 // Drop the cached connection, so the next request dials a new one.
                 *self.quic_conn.lock().await = None;

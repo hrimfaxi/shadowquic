@@ -1,4 +1,6 @@
 use bytes::Bytes;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
@@ -35,8 +37,10 @@ const HANDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What [`dispatch`] did with the request, and with the connection.
 pub enum Dispatch {
-    /// Handed to a relay task; the bi-stream is open.
-    Sent,
+    /// The bi-stream is open and the request header is sent. The caller awaits
+    /// the relay, which keeps the session's lifetime owned by the task that
+    /// accepted the request.
+    Sent(Relay),
     /// The bi-stream open timed out and the connection was closed, so the caller
     /// must drop it from its cache.
     Wedged,
@@ -45,14 +49,19 @@ pub enum Dispatch {
     StillActive,
 }
 
-/// Dispatches `req` under [`HANDLE_TIMEOUT`] and starts its relay.
+/// The relay of one dispatched request, resolved but not yet started.
+pub type Relay = Pin<Box<dyn Future<Output = Result<(), SError>> + Send>>;
+
+/// Dispatches `req` under [`HANDLE_TIMEOUT`] and returns its relay.
 ///
-/// [`handle_request`] spawns the relay and returns before it runs, so this bound
-/// covers only opening the bi-stream. quinn's `open_bi` waits for the peer to
-/// raise `MAX_STREAMS` instead of failing, and every caller awaits the dispatch
-/// inline, so without the bound one stuck open stops its caller from accepting
-/// anything else — which is how a single wedged peer turns into an instance that
-/// silently stops serving.
+/// [`handle_request`] opens the bi-stream, sends the request header and hands
+/// back the relay without running it, so this bound covers only the open. The
+/// caller awaits the relay, so a session that is moving data is never cut at
+/// this bound. quinn's `open_bi` waits for the peer to
+/// raise `MAX_STREAMS` instead of failing, so without the bound a peer that
+/// stopped granting credit would park the request forever: with
+/// `keep_alive_interval` set such a connection never goes idle, and only this
+/// bound can break the stall.
 ///
 /// On timeout the connection is closed only when no application data moved
 /// either. [`data_progress`](QuicConnection::data_progress) counts STREAM and
@@ -74,7 +83,7 @@ pub async fn dispatch<C: QuicConnection>(
     )
     .await
     {
-        Ok(result) => result.map(|()| Dispatch::Sent),
+        Ok(result) => result.map(Dispatch::Sent),
         Err(_) => {
             if progress_before.is_some() && progress_before == conn.data_progress() {
                 error!(
@@ -94,13 +103,19 @@ pub async fn dispatch<C: QuicConnection>(
     }
 }
 
-/// Handling a proxy request and starting proxy task with given squic connection
+/// Opens the bi-stream of a proxy request, sends its header, and returns the
+/// relay without running it.
+///
+/// The open and the header write are the only parts that can park on a peer that
+/// stopped granting stream credit, so they stay inline for [`dispatch`] to bound.
+/// The relay itself is left to the caller, whose task is the one that owns the
+/// session and is aborted with it.
 pub async fn handle_request<C: QuicConnection>(
     req: ProxyRequest,
     conn: SQConn<C>,
     over_stream: bool,
     half_close_timeout: u64,
-) -> Result<(), SError> {
+) -> Result<Relay, SError> {
     let (mut send, recv, id) = QuicConnection::open_bi(&conn.conn).await?;
     let _span = span!(Level::INFO, "bistream", id = id);
     let conn_clone = conn.clone();
@@ -112,70 +127,73 @@ pub async fn handle_request<C: QuicConnection>(
     );
     match req {
         crate::ProxyRequest::Tcp(mut tcp_session) => {
-            let fut = async move {
-                info!(dst = %tcp_session.dst, "bistream opened for tcp");
-                let req = SQReq::SQConnect(tcp_session.dst.clone());
-                req.encode(&mut send).await?;
-                trace!(dst = %tcp_session.dst, "tcp connect req header sent");
+            info!(dst = %tcp_session.dst, "bistream opened for tcp");
+            let req = SQReq::SQConnect(tcp_session.dst.clone());
+            req.encode(&mut send).await?;
+            trace!(dst = %tcp_session.dst, "tcp connect req header sent");
 
-                let u: (u64, u64) = crate::utils::copy::copy_bidirectional(
-                    &mut Unsplit { s: send, r: recv },
-                    &mut tcp_session.stream,
-                    8 * 1024,
-                    8 * 1024,
-                    half_close_timeout,
-                )
-                .await?;
+            Ok(Box::pin(
+                async move {
+                    let u: (u64, u64) = crate::utils::copy::copy_bidirectional(
+                        &mut Unsplit { s: send, r: recv },
+                        &mut tcp_session.stream,
+                        8 * 1024,
+                        8 * 1024,
+                        half_close_timeout,
+                    )
+                    .await?;
 
-                info!(
-                    "request:{} finished, upload:{}bytes,download:{}bytes",
-                    tcp_session.dst, u.1, u.0
-                );
-                Ok(()) as Result<(), SError>
-            };
-            fut.await?;
+                    info!(
+                        "request:{} finished, upload:{}bytes,download:{}bytes",
+                        tcp_session.dst, u.1, u.0
+                    );
+                    Ok(())
+                }
+                .in_current_span(),
+            ) as Relay)
         }
 
         crate::ProxyRequest::Udp(udp_session) => {
-            let fut = async move {
-                info!(bind_addr = %udp_session.bind_addr, "bistream opened for udp association");
-                let req = if over_stream {
-                    SQReq::SQAssociatOverStream(udp_session.bind_addr.clone())
-                } else {
-                    SQReq::SQAssociatOverDatagram(udp_session.bind_addr.clone())
-                };
-
-                req.encode(&mut send).await?;
-                trace!("udp associate req header sent");
-
-                let fut2 = handle_udp_recv_ctrl(recv, udp_session.send.clone(), conn.clone());
-                let fut1 = handle_udp_send(send, udp_session.recv, conn, over_stream);
-
-                let fut3 = async {
-                    if udp_session.stream.is_none() {
-                        return Ok(());
-                    }
-                    let mut buf = [0u8];
-                    udp_session
-                        .stream
-                        .unwrap()
-                        .read_exact(&mut buf)
-                        .await
-                        .map_err(|x| SError::UDPSessionClosed(x.to_string()))?;
-                    error!("unexpected data received from socks control stream");
-                    Err(SError::UDPSessionClosed(
-                        "unexpected data received from socks control stream".into(),
-                    )) as Result<(), SError>
-                };
-
-                tokio::try_join!(fut1, fut2, fut3)?;
-                info!("udp association to {} ended", udp_session.bind_addr.clone());
-                Ok(()) as Result<(), SError>
+            info!(bind_addr = %udp_session.bind_addr, "bistream opened for udp association");
+            let req = if over_stream {
+                SQReq::SQAssociatOverStream(udp_session.bind_addr.clone())
+            } else {
+                SQReq::SQAssociatOverDatagram(udp_session.bind_addr.clone())
             };
-            fut.await?;
+
+            req.encode(&mut send).await?;
+            trace!("udp associate req header sent");
+
+            Ok(Box::pin(
+                async move {
+                    let fut2 = handle_udp_recv_ctrl(recv, udp_session.send.clone(), conn.clone());
+                    let fut1 = handle_udp_send(send, udp_session.recv, conn, over_stream);
+
+                    let fut3 = async {
+                        if udp_session.stream.is_none() {
+                            return Ok(());
+                        }
+                        let mut buf = [0u8];
+                        udp_session
+                            .stream
+                            .unwrap()
+                            .read_exact(&mut buf)
+                            .await
+                            .map_err(|x| SError::UDPSessionClosed(x.to_string()))?;
+                        error!("unexpected data received from socks control stream");
+                        Err(SError::UDPSessionClosed(
+                            "unexpected data received from socks control stream".into(),
+                        )) as Result<(), SError>
+                    };
+
+                    tokio::try_join!(fut1, fut2, fut3)?;
+                    info!("udp association to {} ended", udp_session.bind_addr.clone());
+                    Ok(())
+                }
+                .in_current_span(),
+            ) as Relay)
         }
     }
-    Ok(())
 }
 
 /// Helper function to create new stream for proxy dstination
@@ -361,4 +379,150 @@ pub async fn associate_udp<C: QuicConnection>(
     );
 
     Ok((udp_send, udp_recv))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TcpSession, UserContext, quic::QuicErrorRepr};
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream},
+        sync::{Mutex, SetOnce, mpsc},
+    };
+
+    /// Records what the relay writes toward the peer, so a test can observe the
+    /// uplink direction without a QUIC connection.
+    struct Uplink(mpsc::UnboundedSender<Bytes>);
+
+    impl AsyncWrite for Uplink {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let _ = self.0.send(Bytes::copy_from_slice(buf));
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A connection that hands out one bi-stream backed by a duplex the test
+    /// keeps the other end of, so both relay directions can be driven.
+    #[derive(Clone)]
+    struct RelayConn {
+        uplink: mpsc::UnboundedSender<Bytes>,
+        /// The peer end of the last bi-stream, written by the test.
+        downlink: Arc<Mutex<Option<DuplexStream>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl QuicConnection for RelayConn {
+        type SendStream = Uplink;
+        type RecvStream = DuplexStream;
+
+        async fn open_bi(
+            &self,
+        ) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
+            let (peer, relay) = tokio::io::duplex(64 * 1024);
+            *self.downlink.lock().await = Some(peer);
+            Ok((Uplink(self.uplink.clone()), relay, 0))
+        }
+        async fn accept_bi(
+            &self,
+        ) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
+            Err(QuicErrorRepr::QuicBaseError("unused".into()))
+        }
+        async fn open_uni(&self) -> Result<(Self::SendStream, u64), QuicErrorRepr> {
+            Err(QuicErrorRepr::QuicBaseError("unused".into()))
+        }
+        async fn accept_uni(&self) -> Result<(Self::RecvStream, u64), QuicErrorRepr> {
+            Err(QuicErrorRepr::QuicBaseError("unused".into()))
+        }
+        async fn read_datagram(&self) -> Result<Bytes, QuicErrorRepr> {
+            std::future::pending().await
+        }
+        async fn send_datagram(&self, _bytes: Bytes) -> Result<(), QuicErrorRepr> {
+            Ok(())
+        }
+        fn close(&self, _error_code: u64, _reason: &[u8]) {}
+        fn close_reason(&self) -> Option<QuicErrorRepr> {
+            None
+        }
+        fn remote_address(&self) -> std::net::SocketAddr {
+            "127.0.0.1:1".parse().unwrap()
+        }
+        fn peer_id(&self) -> u64 {
+            0
+        }
+    }
+
+    /// [`HANDLE_TIMEOUT`] exists to break a peer that stopped granting stream
+    /// credit. It must not become a lifetime cap on the session it dispatched:
+    /// wrapping the whole relay in it cut every download, ssh session and udp
+    /// association at ten seconds while leaving the connection open, so nothing
+    /// else reported it.
+    #[tokio::test(start_paused = true)]
+    async fn a_session_survives_the_bi_stream_open_bound() {
+        let (uplink, mut relayed) = mpsc::unbounded_channel();
+        let downlink = Arc::new(Mutex::new(None));
+        let conn = RelayConn {
+            uplink,
+            downlink: downlink.clone(),
+        };
+        let sq_conn = SQConn::new(conn, SetOnce::new_with(Some(Ok("user".to_string()))));
+
+        let (mut local, session_side) = tokio::io::duplex(64 * 1024);
+        let req = ProxyRequest::Tcp(TcpSession {
+            stream: Box::new(session_side) as crate::AnyTcp,
+            dst: std::net::SocketAddr::from(([192, 0, 2, 1], 443)).into(),
+            src_addr: None,
+            user_context: UserContext::default(),
+        });
+
+        let Ok(Dispatch::Sent(relay)) = dispatch(req, sq_conn, false, 0).await else {
+            panic!("dispatch waited for the session instead of handing back its relay");
+        };
+        let relay = tokio::spawn(relay);
+
+        // The request header is written before the relay starts.
+        assert!(relayed.recv().await.is_some());
+
+        // Past the bound, the session must still carry data both ways.
+        tokio::time::advance(HANDLE_TIMEOUT + Duration::from_secs(1)).await;
+        let alive = tokio::time::timeout(HANDLE_TIMEOUT, async {
+            local.write_all(b"hello").await.unwrap();
+            let mut seen = Vec::new();
+            while !seen.ends_with(b"hello") {
+                seen.extend_from_slice(&relayed.recv().await.unwrap());
+            }
+
+            downlink
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .write_all(b"world")
+                .await
+                .unwrap();
+            let mut buf = [0u8; 5];
+            local.read_exact(&mut buf).await.unwrap();
+            buf
+        })
+        .await;
+
+        relay.abort();
+        assert_eq!(
+            alive.expect("the session stopped carrying data after the bound"),
+            *b"world"
+        );
+    }
 }
