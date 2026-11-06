@@ -309,6 +309,7 @@ async fn print_stats<C: QuicConnection>(sq_conn: &SQConn<C>) -> SResult<()> {
         uplink,
         downlink,
         time: Instant::now(),
+        birth_time: sq_conn.birth_time,
     });
     Ok(())
 }

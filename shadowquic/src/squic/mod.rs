@@ -39,19 +39,59 @@ use crate::{
 pub mod inbound;
 pub mod outbound;
 
+#[cfg(test)]
+mod udp_recv_tests;
+
 /// SQuic connection, it is shared by shadowquic and sunnyquic and is a wrapper of quic connection.
 /// It contains a connection object and two ID store for managing UDP sockets.
 /// The IDStore stores the mapping between ids and the destionation addresses as well as associated sockets
 #[derive(Clone)]
-pub struct SQConn<T: QuicConnection> {
+pub struct SQConn<T: QuicConnection>(Arc<SQConnInner<T>>);
+
+pub struct SQConnInner<T: QuicConnection> {
     pub(crate) conn: T,
-    pub authed: Arc<SetOnce<SResult<String>>>,
+    pub authed: SetOnce<SResult<String>>,
     pub(crate) send_id_store: IDStore<()>,
     pub(crate) recv_id_store: IDStore<(AnyUdpSend, SocksAddr)>,
     /// Latest successful peer stats response and the time it was received.
-    pub stats: Arc<Mutex<Option<SQConnStats>>>,
+    pub stats: Mutex<Option<SQConnStats>>,
     /// Serialize remote refreshes without blocking readers of the cached sample.
-    pub(crate) stats_refresh: Arc<Mutex<()>>,
+    pub(crate) stats_refresh: Mutex<()>,
+    /// Instant the connection established.
+    pub birth_time: Instant,
+}
+
+impl<T: QuicConnection> SQConn<T> {
+    pub(crate) fn new(conn: T, authed: SetOnce<SResult<String>>) -> SQConn<T> {
+        SQConn(Arc::new(SQConnInner {
+            conn,
+            authed,
+            send_id_store: Default::default(),
+            recv_id_store: IDStore {
+                id_counter: Default::default(),
+                inner: Default::default(),
+            },
+            stats: Default::default(),
+            stats_refresh: Default::default(),
+            birth_time: Instant::now(),
+        }))
+    }
+}
+
+impl<T: QuicConnection> Deref for SQConn<T> {
+    type Target = SQConnInner<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: QuicConnection> Deref for SQConnInner<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
 }
 
 #[derive(Clone)]
@@ -59,6 +99,7 @@ pub struct SQConnStats {
     pub uplink: ConnStats,
     pub downlink: ConnStats,
     pub time: Instant,
+    pub birth_time: Instant,
 }
 
 async fn wait_sunny_auth<T: QuicConnection>(conn: &SQConn<T>) -> SResult<String> {
@@ -78,7 +119,7 @@ pub(crate) async fn auth_sunny<T: QuicConnection>(
     user_hash: SunnyCredential,
 ) -> SResult<()> {
     if conn.authed.get().is_none() {
-        let (mut send, _recv, _id) = conn.open_bi().await?;
+        let (mut send, _recv, _id) = conn.conn.open_bi().await?;
         SQReq::SQAuthenticate(user_hash).encode(&mut send).await?;
         debug!("authentication request sent");
         conn.authed
@@ -86,14 +127,6 @@ pub(crate) async fn auth_sunny<T: QuicConnection>(
             .expect("repeated authentication");
     }
     Ok(())
-}
-
-impl<T: QuicConnection> Deref for SQConn<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.conn
-    }
 }
 
 pub(crate) struct NotifyBuffer {
@@ -356,51 +389,40 @@ impl IDStore {
         id: u16,
         val: (Arc<dyn UdpSend>, SocksAddr),
     ) -> SResult<()> {
-        let (socket, addr) = (val.0.clone(), val.1.clone());
-        // The datagrams that arrived before this header are flushed after the
-        // lock is released: the flush talks to the local consumer, another task
-        // that can be slow, so holding `inner` across it would stall every
-        // other id here.
-        let prelude = {
-            let mut h = self.inner.write().await;
-            trace!("receiving side alive socket number: {}", h.len());
-            match h.get_mut(&id) {
-                Some(s) => match s {
-                    Ok(_) => {
-                        error!("id:{} already exists", id);
-                        Vec::new()
-                    }
-                    Err(_) => {
-                        let notify = replace(s, Ok(val));
-                        //let _ = notify.map_err(|x| x.notify_one());
-                        match notify {
-                            Ok(_) => {
-                                panic!("should be notify"); // should never happen
+        let mut h = self.inner.write().await;
+        trace!("receiving side alive socket number: {}", h.len());
+        let r = h.get_mut(&id);
+        if let Some(s) = r {
+            match s {
+                Ok(_) => {
+                    error!("id:{} already exists", id);
+                }
+                Err(_) => {
+                    let (socket, addr) = val.clone();
+                    let notify = replace(s, Ok(val));
+                    // Do not drop here, socket may be release
+                    // too early and udp packet order may be changed
+                    // drop(h);
+                    //let _ = notify.map_err(|x| x.notify_one());
+                    match notify {
+                        Ok(_) => {
+                            panic!("should be notify"); // should never happen
+                        }
+                        Err(n) => {
+                            for bytes in n.buffer {
+                                socket.send_to(bytes, addr.clone()).await?;
                             }
-                            Err(n) => {
-                                n.notify.send(()).unwrap_or_else(|_| {
-                                    debug!("id:{} notifier without subscriber", id)
-                                });
-                                event!(Level::TRACE, "notify socket id:{}", id);
-                                n.buffer
-                            }
+
+                            n.notify.send(()).unwrap_or_else(|_| {
+                                debug!("id:{} notifier without subscriber", id)
+                            });
+                            event!(Level::TRACE, "notify socket id:{}", id);
                         }
                     }
-                },
-                None => {
-                    h.insert(id, Ok(val));
-                    Vec::new()
                 }
             }
-        };
-        for bytes in prelude {
-            // A datagram that cannot be handed over right now is lost, which is
-            // what UDP does under pressure. Failing here instead would leave
-            // the id registered in the store but unknown to the association, so
-            // its teardown would never remove it.
-            if let Err(e) = deliver(socket.clone(), bytes, addr.clone()).await {
-                debug!("dropping buffered udp datagram for id {}: {}", id, e);
-            }
+        } else {
+            h.insert(id, Ok(val));
         }
         Ok(())
     }
@@ -519,9 +541,21 @@ pub async fn handle_udp_send<C: QuicConnection>(
         unistream_map: Default::default(),
     };
     let quic_conn = conn.conn.clone();
+    let mut trace_seq = 0_u64;
     loop {
         let (bytes, dst) = down_stream.recv_from().await?;
+        let should_trace = tracing::enabled!(target: "shadowquic::squic::udp", Level::TRACE) && {
+            let n = trace_seq;
+            trace_seq = trace_seq.wrapping_add(1);
+            n & 1023 == 0 // Trace the first packet, then every 1,024 packets.
+        };
+        if should_trace {
+            trace!(target: "shadowquic::squic::udp", dst = %dst, "udp datagram received from down_stream");
+        }
         let (id, is_new) = session.get_id_or_insert(&dst).await;
+        if should_trace {
+            trace!(target: "shadowquic::squic::udp", context_id = id, dst = %dst, "session id resolved,is_new_id:{}", is_new);
+        }
         //let span = trace_span!("udp", id = id);
         let ctl_header = SQUdpControlHeader {
             dst: dst.clone(),
@@ -538,6 +572,7 @@ pub async fn handle_udp_send<C: QuicConnection>(
             // A lonely datagram without sending the control header will causing
             // memoryleak in the peer.
             ctl_header.encode(&mut send).await?;
+            tracing::trace!(context_id = id, dst = %dst, "udp control header sent");
         }
         {
             let mut head = Vec::<u8>::new();
@@ -559,6 +594,9 @@ pub async fn handle_udp_send<C: QuicConnection>(
                 content.put(bytes);
                 let content = content.freeze();
                 quic_conn.send_datagram(content).await?;
+                if should_trace {
+                    trace!(target: "shadowquic::squic::udp", context_id = id, dst = %dst, "quic unreliable datagram sent to upstream");
+                }
             }
         };
     }
@@ -603,6 +641,7 @@ pub async fn handle_udp_packet_recv<C: QuicConnection>(conn: SQConn<C>) -> Resul
     // parked instead of letting those tasks outlive their connection.
     let mut streams: JoinSet<()> = JoinSet::new();
     let mut pending_sweep_at = tokio::time::Instant::now() + PENDING_SWEEP_INTERVAL;
+    let mut trace_seq = 0_u64;
     loop {
         // Reap finished streams so the set tracks live ones only.
         while streams.try_join_next().is_some() {}
@@ -632,6 +671,14 @@ pub async fn handle_udp_packet_recv<C: QuicConnection>(conn: SQConn<C>) -> Resul
                         continue;
                     }
                 };
+                let should_trace = tracing::enabled!(target: "shadowquic::squic::udp", Level::TRACE) && {
+                    let n = trace_seq;
+                    trace_seq = trace_seq.wrapping_add(1);
+                    n & 1023 == 0 // Trace the first packet, then every 1,024 packets.
+                };
+                if should_trace {
+                    trace!(target: "shadowquic::squic::udp", context_id = id, "quic unreliable datagram received");
+                }
                 let pos = cur.position() as usize;
                 if let Err(e) = id_store.feed_datagram(id, cur.into_inner().split_off(pos).freeze()).await {
                     // One lost datagram is not a reason to stop serving the
@@ -644,6 +691,8 @@ pub async fn handle_udp_packet_recv<C: QuicConnection>(conn: SQConn<C>) -> Resul
                     } else {
                         error!("dropping udp datagram for id {}: {}", id, e);
                     }
+                } else if should_trace {
+                    trace!(target: "shadowquic::squic::udp", context_id = id, "quic unreliable datagram received sent to upstream");
                 }
             }
 
@@ -941,7 +990,7 @@ mod udp_receive_tests {
             .unwrap();
 
         let accepted = Arc::new(AtomicBool::new(false));
-        let conn = SQConn {
+        let conn = SQConn(Arc::new(SQConnInner {
             conn: OneStreamConn {
                 stream: Arc::new(Mutex::new(Some(ParkedStream {
                     dropped: Arc::new(AtomicBool::new(false)),
@@ -951,12 +1000,13 @@ mod udp_receive_tests {
                 datagrams: Arc::new(Mutex::new(VecDeque::from([datagram_for(7).await]))),
                 stay_open: false,
             },
-            authed: Arc::new(SetOnce::new_with(Some(Ok("user".to_string())))),
+            authed: SetOnce::new_with(Some(Ok("user".to_string()))),
             send_id_store: Default::default(),
             recv_id_store: store,
             stats: Default::default(),
             stats_refresh: Default::default(),
-        };
+            birth_time: Instant::now(),
+        }));
         let receiving = tokio::spawn(handle_udp_packet_recv(conn));
 
         // The datagram's consumer never drains, and the fake only offers the
@@ -990,7 +1040,7 @@ mod udp_receive_tests {
             .await
             .unwrap();
 
-        let conn = SQConn {
+        let conn = SQConn(Arc::new(SQConnInner {
             conn: OneStreamConn {
                 stream: Arc::new(Mutex::new(None)),
                 accepted: Arc::new(AtomicBool::new(false)),
@@ -1002,12 +1052,13 @@ mod udp_receive_tests {
                 ]))),
                 stay_open: true,
             },
-            authed: Arc::new(SetOnce::new_with(Some(Ok("user".to_string())))),
+            authed: SetOnce::new_with(Some(Ok("user".to_string()))),
             send_id_store: Default::default(),
             recv_id_store: store.clone(),
             stats: Default::default(),
             stats_refresh: Default::default(),
-        };
+            birth_time: Instant::now(),
+        }));
         let receiving = tokio::spawn(handle_udp_packet_recv(conn));
 
         // The malformed datagram must not end the connection's reception: the
@@ -1209,7 +1260,7 @@ mod udp_receive_tests {
     #[tokio::test]
     async fn stream_tasks_do_not_outlive_the_connection() {
         let dropped = Arc::new(AtomicBool::new(false));
-        let conn = SQConn {
+        let conn = SQConn(Arc::new(SQConnInner {
             conn: OneStreamConn {
                 stream: Arc::new(Mutex::new(Some(ParkedStream {
                     dropped: dropped.clone(),
@@ -1219,12 +1270,13 @@ mod udp_receive_tests {
                 datagrams: Arc::new(Mutex::new(VecDeque::new())),
                 stay_open: false,
             },
-            authed: Arc::new(SetOnce::new_with(Some(Ok("user".to_string())))),
+            authed: SetOnce::new_with(Some(Ok("user".to_string()))),
             send_id_store: Default::default(),
             recv_id_store: store(),
             stats: Default::default(),
             stats_refresh: Default::default(),
-        };
+            birth_time: Instant::now(),
+        }));
 
         // A connection that is gone is what ends the receive loop.
         assert!(handle_udp_packet_recv(conn).await.is_err());
@@ -1364,7 +1416,7 @@ mod udp_receive_tests {
             .await
             .unwrap();
         let polled = Arc::new(AtomicBool::new(false));
-        let conn = SQConn {
+        let conn = SQConn(Arc::new(SQConnInner {
             conn: OneStreamConn {
                 stream: Arc::new(Mutex::new(None)),
                 accepted: Arc::new(AtomicBool::new(false)),
@@ -1372,12 +1424,13 @@ mod udp_receive_tests {
                 datagrams: Arc::new(Mutex::new(VecDeque::new())),
                 stay_open: true,
             },
-            authed: Arc::new(SetOnce::new_with(Some(Ok("user".to_string())))),
+            authed: SetOnce::new_with(Some(Ok("user".to_string()))),
             send_id_store: Default::default(),
             recv_id_store: store.clone(),
             stats: Default::default(),
             stats_refresh: Default::default(),
-        };
+            birth_time: Instant::now(),
+        }));
         let receiving = tokio::spawn(handle_udp_packet_recv(conn));
 
         // Wait for the loop to poll, so its sweep timer exists before the clock
