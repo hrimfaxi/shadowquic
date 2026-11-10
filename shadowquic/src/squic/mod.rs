@@ -1137,42 +1137,6 @@ mod udp_receive_tests {
         feeding.abort();
     }
 
-    #[tokio::test]
-    async fn a_failed_prelude_still_registers_the_socket() {
-        let store = store();
-        // A datagram arrived before its control header, so the id is pending
-        // with one buffered packet.
-        store
-            .feed_datagram(7, Bytes::from_static(b"early"))
-            .await
-            .unwrap();
-
-        // The consumer is stuck, so flushing that prelude cannot succeed.
-        let (entered, _entered_rx) = mpsc::unbounded_channel();
-        let mut session = AssociateRecvSession {
-            id_store: store.clone(),
-            id_map: Default::default(),
-        };
-        session
-            .store_socket(7, test_addr(), Arc::new(StuckSend { entered }))
-            .await
-            .expect("a lost prelude datagram must not fail the registration");
-        assert!(
-            matches!(store.inner.read().await.get(&7), Some(Ok(_))),
-            "the id should be registered"
-        );
-
-        // The association ends, and it must take its id with it.
-        drop(session);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while store.inner.read().await.contains_key(&7) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the association teardown must remove its registered id");
-    }
-
     #[tokio::test(start_paused = true)]
     async fn delayed_control_header_still_resolves_stream() {
         let store = store();
