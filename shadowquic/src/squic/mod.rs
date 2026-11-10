@@ -26,7 +26,7 @@ use tokio::{
 use tracing::{Instrument, Level, debug, error, event, info, trace};
 
 use crate::{
-    AnyUdpRecv, AnyUdpSend, UdpSend,
+    AnyUdpRecv, AnyUdpSend, UdpSend, UdpSendExt,
     error::{SError, SResult},
     msgs::{
         SDecode, SEncode,
@@ -121,7 +121,10 @@ pub(crate) async fn auth_sunny<T: QuicConnection>(
     if conn.authed.get().is_none() {
         let (mut send, _recv, _id) = conn.conn.open_bi().await?;
         SQReq::SQAuthenticate(user_hash).encode(&mut send).await?;
-        debug!("authentication request sent");
+        debug!(
+            event = "security:authentication_request_sent",
+            "authentication request sent"
+        );
         conn.authed
             .set(Ok(username.to_string()))
             .expect("repeated authentication");
@@ -244,12 +247,19 @@ where
     #[allow(dead_code)]
     async fn store_socket(&self, id: u16, val: T) -> Option<Vec<Bytes>> {
         let mut h = self.inner.write().await;
-        trace!("receiving side alive socket number: {}", h.len());
+        trace!(
+            event = "squic:receive_socket_count",
+            "receiving side alive socket number: {}",
+            h.len()
+        );
         let r = h.get_mut(&id);
         if let Some(s) = r {
             match s {
                 Ok(_) => {
-                    error!("id:{} already exists", id);
+                    error!(
+                        event = "squic:context_id_conflict",
+                        "id:{} already exists", id
+                    );
                 }
                 Err(_) => {
                     let notify = replace(s, Ok(val));
@@ -260,9 +270,17 @@ where
                         }
                         Err(n) => {
                             n.notify.send(()).unwrap_or_else(|_| {
-                                debug!("id:{} notifier without subscriber", id)
+                                debug!(
+                                    event = "squic:context_subscriber_missing",
+                                    "id:{} notifier without subscriber", id
+                                )
                             });
-                            event!(Level::TRACE, "notify socket id:{}", id);
+                            event!(
+                                Level::TRACE,
+                                event = "squic:context_notified",
+                                "notify socket id:{}",
+                                id
+                            );
                             return Some(n.buffer);
                         }
                     }
@@ -275,7 +293,11 @@ where
     }
     async fn fetch_new_id(&self, val: T) -> u16 {
         let mut inner = self.inner.write().await;
-        trace!("sending side socket number: {}", inner.len());
+        trace!(
+            event = "squic:send_socket_count",
+            "sending side socket number: {}",
+            inner.len()
+        );
         let mut r;
         loop {
             r = self
@@ -287,26 +309,6 @@ where
             }
         }
         r
-    }
-}
-
-/// Hand one datagram to the association's local socket without waiting for the
-/// consumer to make room.
-///
-/// The consumer is another task and can stop draining, and waiting for it —
-/// however briefly — parks the connection's receive loop on this one
-/// association. A datagram that cannot be taken right now is dropped instead,
-/// which is what UDP does under pressure anyway. The send is polled once: an
-/// mpsc sender completes immediately when it has room.
-async fn deliver(socket: AnyUdpSend, packet: Bytes, addr: SocksAddr) -> SResult<()> {
-    match tokio::time::timeout(Duration::ZERO, socket.send_to(packet, addr)).await {
-        Ok(result) => {
-            result?;
-            Ok(())
-        }
-        Err(_) => Err(SError::ChannelError(
-            "local udp consumer is not draining".into(),
-        )),
     }
 }
 
@@ -380,7 +382,12 @@ impl IDStore {
             }
         };
         match target {
-            Some((socket, addr)) => deliver(socket, packet, addr).await,
+            // Nonblocking sender: the consumer is another task and can stop
+            // draining, and waiting for it — however briefly — parks the
+            // connection's receive loop on this one association. A datagram it
+            // cannot take right now is dropped instead, which is what UDP does
+            // under pressure anyway.
+            Some((socket, addr)) => socket.try_send_to(packet, addr).await.map(|_| ()),
             None => Ok(()),
         }
     }
@@ -390,12 +397,19 @@ impl IDStore {
         val: (Arc<dyn UdpSend>, SocksAddr),
     ) -> SResult<()> {
         let mut h = self.inner.write().await;
-        trace!("receiving side alive socket number: {}", h.len());
+        trace!(
+            event = "squic:receive_socket_count",
+            "receiving side alive socket number: {}",
+            h.len()
+        );
         let r = h.get_mut(&id);
         if let Some(s) = r {
             match s {
                 Ok(_) => {
-                    error!("id:{} already exists", id);
+                    error!(
+                        event = "squic:context_id_conflict",
+                        "id:{} already exists", id
+                    );
                 }
                 Err(_) => {
                     let (socket, addr) = val.clone();
@@ -414,9 +428,17 @@ impl IDStore {
                             }
 
                             n.notify.send(()).unwrap_or_else(|_| {
-                                debug!("id:{} notifier without subscriber", id)
+                                debug!(
+                                    event = "squic:context_subscriber_missing",
+                                    "id:{} notifier without subscriber", id
+                                )
                             });
-                            event!(Level::TRACE, "notify socket id:{}", id);
+                            event!(
+                                Level::TRACE,
+                                event = "squic:context_notified",
+                                "notify socket id:{}",
+                                id
+                            );
                         }
                     }
                 }
@@ -444,7 +466,7 @@ impl<W: AsyncWrite> AssociateSendSession<W> {
         } else {
             let id = self.id_store.fetch_new_id(()).await;
             self.dst_map.insert(addr.clone(), id);
-            debug!(context_id = id, dst = %addr, "send session insert");
+            debug!(event = "squic:send_context_id_created", context_id = id, dst = %addr, "send session insert");
             (id, true)
         }
     }
@@ -464,6 +486,7 @@ impl<W: AsyncWrite> Drop for AssociateSendSession<W> {
                 let decrease = len - id_store.len();
                 event!(
                     Level::TRACE,
+                    event = "squic:send_context_ids_removed",
                     "AssociateSendSession dropped, session id size:{}, {} ids cleaned",
                     id_remove.len(),
                     decrease
@@ -493,7 +516,7 @@ impl AssociateRecvSession {
             self.id_store
                 .store_socket_with_prelude(id, (socks, dst.clone()))
                 .await?;
-            debug!(context_id = id, dst = %dst, "recv session insert");
+            debug!(event = "squic:receive_context_id_created", context_id = id, dst = %dst, "recv session insert");
             e.insert(dst);
         }
         Ok(())
@@ -515,6 +538,7 @@ impl Drop for AssociateRecvSession {
                 let decrease = len - id_store.len();
                 event!(
                     Level::TRACE,
+                    event = "squic:receive_context_ids_removed",
                     "AssociateRecvSession dropped, session id size:{}, {} ids cleaned",
                     id_remove.len(),
                     decrease
@@ -550,11 +574,11 @@ pub async fn handle_udp_send<C: QuicConnection>(
             n & 1023 == 0 // Trace the first packet, then every 1,024 packets.
         };
         if should_trace {
-            trace!(target: "shadowquic::squic::udp", dst = %dst, "udp datagram received from down_stream");
+            trace!(target: "shadowquic::squic::udp", event = "squic:downstream_datagram_received", dst = %dst, "udp datagram received from down_stream");
         }
         let (id, is_new) = session.get_id_or_insert(&dst).await;
         if should_trace {
-            trace!(target: "shadowquic::squic::udp", context_id = id, dst = %dst, "session id resolved,is_new_id:{}", is_new);
+            trace!(target: "shadowquic::squic::udp", event = "squic:context_id_resolved", context_id = id, dst = %dst, "session id resolved,is_new_id:{}", is_new);
         }
         //let span = trace_span!("udp", id = id);
         let ctl_header = SQUdpControlHeader {
@@ -572,7 +596,7 @@ pub async fn handle_udp_send<C: QuicConnection>(
             // A lonely datagram without sending the control header will causing
             // memoryleak in the peer.
             ctl_header.encode(&mut send).await?;
-            tracing::trace!(context_id = id, dst = %dst, "udp control header sent");
+            tracing::trace!(event = "squic:control_header_sent", context_id = id, dst = %dst, "udp control header sent");
         }
         {
             let mut head = Vec::<u8>::new();
@@ -595,7 +619,7 @@ pub async fn handle_udp_send<C: QuicConnection>(
                 let content = content.freeze();
                 quic_conn.send_datagram(content).await?;
                 if should_trace {
-                    trace!(target: "shadowquic::squic::udp", context_id = id, dst = %dst, "quic unreliable datagram sent to upstream");
+                    trace!(target: "shadowquic::squic::udp", event = "squic:datagram_sent", context_id = id, dst = %dst, "quic unreliable datagram sent to upstream");
                 }
             }
         };
@@ -618,11 +642,16 @@ pub async fn handle_udp_recv_ctrl<C: QuicConnection>(
     };
     loop {
         let SQUdpControlHeader { id, dst } = SQUdpControlHeader::decode(&mut recv).await?;
-        info!(context_id = id, dst = %dst, "udp control header received");
+        info!(event = "squic:control_header_received", context_id = id, dst = %dst, "udp control header received");
         let _ = session
             .store_socket(id, dst, udp_socket.clone())
             .await
-            .map_err(|e| error!("failed to writing data to udp socket:{e}"));
+            .map_err(|e| {
+                error!(
+                    event = "squic:datagram_write_failed",
+                    "failed to writing data to udp socket:{e}"
+                )
+            });
     }
     #[allow(unreachable_code)]
     Ok(())
@@ -677,22 +706,26 @@ pub async fn handle_udp_packet_recv<C: QuicConnection>(conn: SQConn<C>) -> Resul
                     n & 1023 == 0 // Trace the first packet, then every 1,024 packets.
                 };
                 if should_trace {
-                    trace!(target: "shadowquic::squic::udp", context_id = id, "quic unreliable datagram received");
+                    trace!(target: "shadowquic::squic::udp", event = "squic:datagram_received", context_id = id, "quic unreliable datagram received");
                 }
                 let pos = cur.position() as usize;
-                if let Err(e) = id_store.feed_datagram(id, cur.into_inner().split_off(pos).freeze()).await {
+                match id_store.feed_datagram(id, cur.into_inner().split_off(pos).freeze()).await {
+                    Ok(()) => {
+                        if should_trace {
+                            trace!(target: "shadowquic::squic::udp", event = "squic:datagram_forwarded", context_id = id, "quic unreliable datagram received sent to upstream");
+                        }
+                    }
                     // One lost datagram is not a reason to stop serving the
                     // whole connection. A consumer that could not take it in
                     // time is ordinary loss under pressure; anything else (no
                     // live socket for the id, or a failing local socket) is
                     // worth an error.
-                    if matches!(e, SError::ChannelError(_)) {
-                        debug!("dropping udp datagram for id {}: {}", id, e);
-                    } else {
-                        error!("dropping udp datagram for id {}: {}", id, e);
+                    Err(e @ SError::UdpSenderBusy(_)) => {
+                        debug!(event = "squic:datagram_dropped", context_id = id, %e, "dropping UDP datagram due to sender busy");
                     }
-                } else if should_trace {
-                    trace!(target: "shadowquic::squic::udp", context_id = id, "quic unreliable datagram received sent to upstream");
+                    Err(e) => {
+                        error!(event = "squic:datagram_delivery_failed", context_id = id, %e, "dropping UDP datagram after delivery failure");
+                    }
                 }
             }
 
@@ -702,7 +735,7 @@ pub async fn handle_udp_packet_recv<C: QuicConnection>(conn: SQConn<C>) -> Resul
             // nor stop the loop.
             uni = conn.accept_uni() => {
                 let (uni_stream, _id) = uni?;
-                trace!("unistream accepted");
+                trace!(event = "squic:unidirectional_stream_accepted", "unistream accepted");
                 let id_store = id_store.clone();
                 let conn = conn.clone();
                 streams.spawn(
@@ -751,11 +784,15 @@ async fn serve_uni_stream<C: QuicConnection>(
         tokio::time::timeout_at(deadline, SQPacketDatagramHeader::decode(&mut uni_stream))
             .await
             .map_err(|_| SError::UDPSessionClosed("udp stream header timed out".into()))??;
-    trace!(context_id = id, "resolving datagram id");
+    trace!(
+        event = "squic:context_resolution_started",
+        context_id = id,
+        "resolving datagram id"
+    );
 
     let (udp, addr) = resolve_udp_session(&id_store, id, deadline).await?;
 
-    info!(context_id = id, peer_addr = %conn.remote_address(), dst = %addr, "udp over stream");
+    info!(event = "squic:udp_stream_started", context_id = id, peer_addr = %conn.remote_address(), dst = %addr, "udp over stream");
 
     relay_uni_stream(&mut uni_stream, udp.as_ref(), &addr).await
 }

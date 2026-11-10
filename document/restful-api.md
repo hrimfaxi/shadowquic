@@ -20,8 +20,10 @@ restful-api:
 
 Any bind address is allowed, including `0.0.0.0` and `::`, with or without a
 secret. A nonempty `secret` requires `Authorization: Bearer <secret>` on every
-API request except CORS preflights. Omit `secret` or set it to `""` to disable
-authentication. Omit `restful-api` to leave the HTTP listener disabled. Configuring
+API request except CORS preflights. The log WebSocket also accepts the secret
+in its `token` query parameter for browser clients. Omit `secret` or set it to
+`""` to disable authentication. Omit `restful-api` to leave the HTTP listener
+disabled. Configuring
 the listener without compiling `restful-api` produces a configuration error.
 A bind failure prevents manager startup.
 
@@ -112,6 +114,7 @@ fields are `null`. Collections are sorted by tag or session ID.
 | GET | `/api/v1/connections` | `{"connections": [...]}`: active TCP sessions and UDP associations |
 | GET | `/api/v1/traffic` | `{"inbounds": [...]}`: summed user traffic and active session counts per inbound |
 | GET | `/api/v1/tokio_metric` | Tokio runtime worker count, alive task count, and global queue depth |
+| GET | `/api/v1/logs` | WebSocket upgrade; live structured JSON logs |
 | GET | `/api/v1/memory` | jemalloc allocator statistics; requires `jemalloc` |
 | POST | `/api/v1/memory/profile` | Download a jemalloc heap profile; requires `mem-profile` |
 | GET | `/api/v1/memory/profile/status` | Current sampling state as `{"active":true}` or `{"active":false}`; requires `mem-profile` |
@@ -137,6 +140,143 @@ Errors have the form `{"error":{"code":"...","message":"..."}}`.
 Invalid requests return `400`, unknown routes or tags `404`, wrong methods
 `405`, overlapping probes on the same outbound `409`, unsupported operations
 `501`, failed probes `502`, and probe timeouts `504`.
+
+## Live logs over WebSocket
+
+### HTML trace viewer
+
+Open the [standalone HTML viewer](../assets/log_viewer.html) directly in a
+browser to analyze the stream. Enter the WebSocket endpoint and API secret to
+connect. The viewer needs no installation or external scripts and is not
+embedded in or served by Shadowquic. It can also import
+a JSON array, an object containing a `records` array, or JSONL/NDJSON records
+from an exported capture. These are Shadowquic log records, not native qlog
+files. The demo capture is illustrative and labeled as a demo.
+
+Select a request or connection in the sidebar to inspect category lanes on a
+zoomable event timeline. Filter by category, log level or text, then select a
+marker or row to inspect its raw fields and span context. Times are relative to
+the earliest timestamp in the retained capture. Records without timestamps
+remain in the event table but have no timeline marker.
+
+Grouping reads `fields.req_id` from the log record first, then a flattened
+top-level `req_id`, then span fields from the nearest span outward. Numeric and
+string IDs normalize to the same key, including zero; blank or invalid IDs are
+skipped so they do not hide a usable span ID.
+Otherwise an inbound span's connection ID, tag and source identify a connection.
+Records without either identity appear as unscoped events; destinations alone
+are not used to infer connections. Imported captures should come from one
+process/run because request counters can repeat after a restart.
+
+Events are saved in **IndexedDB**, so the retained capture survives page reloads.
+The **Max stored events** setting defaults to 20,000 and accepts any positive
+safe whole number. Raise it for larger captures, or lower it to immediately
+remove the oldest events and their unused request groups. The setting persists
+across reloads and applies to both live streams and imported files. **Clear**
+deletes the retained capture's events without changing the limit.
+
+Connecting successfully starts a fresh capture. Pause display freezes a bounded
+display snapshot while live capture continues in IndexedDB. Filters and request
+selection are disabled while paused; Resume display shows the latest retained
+records. Imports stream JSONL, JSON arrays, or `records` wrappers in batches,
+without the former 25 MiB file limit. A candidate import uses temporary database
+space, up to the retention limit, until validation succeeds; a malformed import
+leaves the current capture intact. Abandoned imports older than a day are cleaned
+up when the viewer opens.
+
+Export JSONL reads all retained records in batches, independently of display
+filters. Browsers with a save-file picker write directly to the chosen file;
+other browsers download a browser-managed Blob. If retention removes records
+during export, the viewer reports the change; disconnect and export again for a
+fixed capture. Neither the endpoint nor the API secret from the connection form
+is included in exports, and the secret is not saved in browser storage.
+
+The event limit counts records rather than bytes; browser disk quotas still
+apply. Storage failures are reported and stop live capture instead of silently
+falling back to an unbounded in-memory buffer. The live write queue is bounded
+to 5,000 pending events and reports skipped events if storage cannot keep up.
+Closing the page can lose pending writes; committed records remain in IndexedDB.
+Viewer evictions are reported separately from the server's skipped-record notices.
+The event table shows the latest 500 matching records. Large timelines sample
+up to 5,000 markers (plus a selected marker) and display the marker count;
+indexed queries and batched text searches cover every retained record without
+loading the full capture into memory. The sidebar lists the
+latest 200 matching groups; search finds older retained requests. Existing
+source-side sampling and correlation limits still apply. The WebSocket captures
+at trace level independently of the console's configured `log-level`.
+
+### WebSocket protocol
+
+Connect to `ws://127.0.0.1:9090/api/v1/logs`. With a configured secret, send
+`Authorization: Bearer <secret>` in the upgrade request. Browser WebSocket clients
+can use a URL-encoded `token` instead:
+
+```javascript
+const url = new URL("ws://127.0.0.1:9090/api/v1/logs");
+url.searchParams.set("token", secret);
+const socket = new WebSocket(url);
+socket.onmessage = ({ data }) => {
+  const record = JSON.parse(data);
+  console.log(record.event, record.fields, record.spans);
+};
+```
+
+The token parameter is accepted only on this endpoint. Query authentication
+rejects duplicate tokens; an invalid Authorization header is rejected even if
+the query token is valid. URLs contain the token, so avoid
+recording or sharing those URLs. Use `wss://` when accessing the listener through
+a TLS reverse proxy that supports WebSocket upgrades. The listener itself serves
+plain HTTP/WebSocket. Cookie authentication is not supported.
+
+A successful handshake returns `101 Switching Protocols`. An ordinary GET without
+WebSocket upgrade headers returns `400`; other methods return `405`. Existing
+`401` authentication responses also apply before upgrading.
+
+Each text message contains one JSON record:
+
+```json
+{
+  "timestamp": "2026-11-07T08:00:00Z",
+  "level": "INFO",
+  "target": "shadowquic::socks::inbound",
+  "event": "socks:tcp_request_accepted",
+  "fields": {"message": "tcp connect request accepted", "dst": "example.com:443"},
+  "spans": [{"name": "inbound", "fields": {"tag": "socks", "req_id": 42}}]
+}
+```
+
+Spans are ordered from root to leaf and include fields updated with
+`Span::record`. Native boolean/numeric fields retain their JSON types; `%` and
+`?` fields are formatted strings. Records without an `event` field are delivered
+with `"event": null`. See [log-events.md](log-events.md) for event categories and
+correlation limits.
+
+The CLI streams `shadowquic` targets at `TRACE` and `quinn` targets at `WARN`,
+including higher levels, independently of `log-level`. Quinn TRACE, DEBUG and INFO
+logs are excluded from the WebSocket stream. The configured `log-level` controls
+console output. Only new
+records are streamed; there is no history or replay. A bounded buffer holds
+1,024 records. A client that falls behind receives a notice such as
+`{"event":"api:logs_lagged","dropped":128}` before the retained records. Notices
+have this smaller schema and identify records skipped by that client. A socket
+write taking more than five seconds closes that stream. API shutdown closes
+all streams. Ping and close frames are supported; client application messages
+are ignored, with incoming messages/frames limited to 4 KiB.
+
+Applications embedding the library must install `shadowquic::api::logs::LogLayer`
+on their tracing subscriber; constructing a manager does not install a global
+subscriber. For example:
+
+```rust,ignore
+use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, Layer};
+let subscriber = tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer().with_filter(LevelFilter::INFO))
+    .with(shadowquic::api::logs::LogLayer.with_filter(shadowquic::api::logs::trace_filter()));
+```
+
+Install this subscriber with your application's normal tracing initialization.
+Log streams are process-wide, including when multiple API managers share a
+process. Without the layer, WebSocket clients can connect but receive no logs.
 
 ## Tokio runtime metrics
 

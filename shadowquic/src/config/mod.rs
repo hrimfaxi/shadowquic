@@ -212,7 +212,7 @@ pub fn default_api_tag() -> String {
 
 /// Default standalone dashboard HTML release.
 pub fn default_ui_download_url() -> String {
-    "https://github.com/spongebob888/squirrelboard/releases/download/v0.1.2/index.html".into()
+    "https://github.com/spongebob888/squirrelboard/releases/download/v0.1.4/index.html".into()
 }
 impl Config {
     /// Explicit outbounds come first, followed by automatically registered DNS services.
@@ -1222,6 +1222,7 @@ pub fn maybe_warn_cipher_suite_on_weak_arch<T: HasCipherSuitePreference>(_cfg: &
     {
         if !_cfg.has_cipher_suite_preference() {
             warn!(
+                event = "configuration:cipher_preference_missing",
                 "No `cipher-suite-preference` configured on MIPS target. \
                  AES-128-GCM may be significantly slower than ChaCha20-Poly1305 on weak MIPS devices. \
                  Consider setting `cipher-suite-preference: [\"chacha20-poly1305\", \"aes128-gcm\", \"aes256-gcm\"]`."
@@ -1243,6 +1244,7 @@ pub fn normalize_cipher_suite_preference(
 
     if !out.contains(&CipherSuitePreference::Aes128Gcm) {
         warn!(
+            event = "configuration:cipher_preference_adjusted",
             "`cipher-suite-preference` does not include `aes128-gcm`; appending it automatically"
         );
         out.push(CipherSuitePreference::Aes128Gcm);

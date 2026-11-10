@@ -14,13 +14,44 @@ pub enum SniffProtocol {
 pub struct SnifferRule {
     /// Empty means every destination port. Overlapping rules combine protocols.
     pub ports: Vec<u16>,
+    /// supported protocols for sniffing. TCP supports http/tls; UDP supports quic.
     pub protocols: Vec<SniffProtocol>,
 }
-
+/// Sniffing configuration for router. Empty means no sniffing. Supports TCP and UDP sniffing.
+/// The sniffing result can be obtained by router script and exposed as
+/// `ctx.sniffer.domain` and `ctx.sniffer.type` and `ctx.sniffer.version`.
+///
+/// Example configuration:
+/// ```yaml
+/// router:
+///   sniffer:
+///     tcp:
+///       - ports: [80]
+///         protocols: [http]
+///       - ports: [443]
+///         protocols: [tls]
+///     udp:
+///       - ports: [] # empty ports sniffing any ports
+///         protocols: [quic]
+///   src: |
+///     return function(ctx)
+///       if ctx.sniffer and ctx.sniffer.domain then
+///         -- Override the destination with the sniffed domain
+///           ctx.dst_domain = ctx.sniffer.domain
+///         end
+///
+///         local ok, cn = pcall(find_domain, "geosite-db", "cn", ctx.sniffer.domain)
+///         if ok and cn then return "direct" end
+///       end
+///       return "select"
+///     end
+/// ```
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SnifferCfg {
+    /// TCP sniffer rules. Empty means no sniffing. Supports HTTP and TLS.
     pub tcp: Vec<SnifferRule>,
+    /// UDP sniffer rules. Empty means no sniffing. Supports QUIC.
     pub udp: Vec<SnifferRule>,
     /// Absolute inspection deadline in milliseconds.
     pub timeout: u64,

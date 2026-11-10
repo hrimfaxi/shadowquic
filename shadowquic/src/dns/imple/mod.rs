@@ -31,7 +31,13 @@ use simple_dns::{
     CLASS, Name, OPCODE, Packet, PacketFlag, QCLASS, QTYPE, Question, RCODE, ResourceRecord, TYPE,
     rdata::RData,
 };
-use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    io,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, UdpSocket},
@@ -239,6 +245,41 @@ impl Drop for DnsServer {
     }
 }
 
+const LISTENER_BIND_ATTEMPTS: usize = 32;
+
+async fn bind_listeners<F, Fut>(
+    bind_addr: SocketAddr,
+    mut bind_udp: F,
+) -> io::Result<(TcpListener, UdpSocket)>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = io::Result<UdpSocket>>,
+{
+    let mut retries = if bind_addr.port() == 0 {
+        LISTENER_BIND_ATTEMPTS - 1
+    } else {
+        0
+    };
+    loop {
+        let tcp = TcpListener::bind(bind_addr).await?;
+        let local_addr = tcp.local_addr()?;
+        match bind_udp(local_addr).await {
+            Ok(udp) => return Ok((tcp, udp)),
+            // A port chosen for TCP need not be available for UDP. On Windows,
+            // an exclusive binding or excluded UDP port can return WSAEACCES.
+            // Drop the TCP listener before requesting a fresh ephemeral pair.
+            Err(error)
+                if retries > 0
+                    && (error.kind() == io::ErrorKind::AddrInUse
+                        || (cfg!(windows) && error.raw_os_error() == Some(10013))) =>
+            {
+                retries -= 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 impl DnsServer {
     async fn new(
         tag: String,
@@ -247,9 +288,9 @@ impl DnsServer {
         cache: Arc<DnsCache>,
         bypass_cache: bool,
     ) -> Result<Self> {
-        let tcp = TcpListener::bind(bind_addr).await?;
+        let (tcp, udp) = bind_listeners(bind_addr, UdpSocket::bind).await?;
         let local_addr = tcp.local_addr()?;
-        let udp = Arc::new(UdpSocket::bind(local_addr).await?);
+        let udp = Arc::new(udp);
         let (tx, rx) = mpsc::channel(256);
         let resolver = Arc::new(Resolver {
             tag,
@@ -413,7 +454,6 @@ impl Resolver {
                 return Err(dns_error("local resolver has no upstream"));
             }
         };
-        tracing::debug!(%dst, tcp, "sending DNS query upstream");
         let dst: SocksAddr = dst.into();
         let user_context = UserContext {
             dns_query: parse_query(query)?
@@ -426,6 +466,8 @@ impl Resolver {
                 .collect(),
             ..UserContext::default()
         };
+        tracing::debug!(%dst, tcp, upstream_req_id = user_context.req_id, event = "dns:query_sent", 
+                        "sending DNS query upstream");
         if !tcp {
             let (send_query, recv_query) = mpsc::channel(5);
             let (send_reply, mut recv_reply) = mpsc::channel(5);
@@ -521,14 +563,15 @@ impl DnsService for Resolver {
         err(level = "debug")
     )]
     async fn exchange(&self, query: &[u8]) -> Result<Vec<u8>> {
+        async {
         let packet = parse_query(query)?;
         let question = &packet.questions[0];
         tracing::Span::current().record("domain", tracing::field::display(&question.qname));
-        tracing::info!(record_type = ?question.qtype, "received DNS query");
+        tracing::info!(event = "dns:query_received", record_type = ?question.qtype, "received DNS query");
         if !self.bypass_cache
             && let Some(cached) = self.cache.get(query)?
         {
-            tracing::trace!("DNS cache hit");
+            tracing::trace!(event = "dns:cache_hit", "DNS cache hit");
             return Ok(cached);
         }
         let reply = tokio::time::timeout(TIMEOUT, async {
@@ -542,7 +585,10 @@ impl DnsService for Resolver {
                         .map_err(dns_error)?
                         .has_flags(PacketFlag::TRUNCATION)
                     {
-                        tracing::debug!("truncated DNS response, retrying over TCP");
+                        tracing::debug!(
+                            event = "dns:query_retried",
+                            "truncated DNS response, retrying over TCP"
+                        );
                         self.upstream(query, true).await
                     } else {
                         Ok(reply)
@@ -553,11 +599,12 @@ impl DnsService for Resolver {
         .await
         .map_err(|_| dns_error("query timed out"))??;
         let packet = validate_response(query, &reply)?;
-        tracing::debug!(rcode = ?packet.rcode(), answers = packet.answers.len(), "received DNS response");
+        tracing::debug!(event = "dns:response_received", rcode = ?packet.rcode(), answers = packet.answers.len(), "received DNS response");
         if !self.bypass_cache {
             self.cache.insert(query, packet);
         }
         Ok(reply)
+    }.await.inspect_err(|e| tracing::error!(event = "dns:query_failed", "DNS query failed: {}", e))
     }
 }
 
