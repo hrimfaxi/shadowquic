@@ -810,14 +810,16 @@ mod tests {
             }
 
             drop(packets);
+            // A dropped datagram channel ends the association; the branch
+            // reports that as a session end rather than as a failing peer.
             assert!(matches!(
                 session.recv.recv_from().await,
-                Err(SError::OutboundUnavailable)
+                Err(SError::UDPSessionClosed(_))
             ));
             drop(replies);
             assert!(matches!(
                 session.send.send_to(payload, rewritten).await,
-                Err(SError::InboundUnavailable)
+                Err(SError::UDPSessionClosed(_))
             ));
         }
     }

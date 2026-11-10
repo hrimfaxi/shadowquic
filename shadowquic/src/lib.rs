@@ -339,7 +339,7 @@ impl UdpSend for Sender<(Bytes, SocksAddr)> {
         let siz = buf.len();
         self.send((buf, addr))
             .await
-            .map_err(|_| SError::InboundUnavailable)?;
+            .map_err(|_| SError::UDPSessionClosed("udp session receiver dropped".into()))?;
         Ok(siz)
     }
     async fn closed(&self) {

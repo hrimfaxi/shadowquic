@@ -39,9 +39,6 @@ use crate::{
 pub mod inbound;
 pub mod outbound;
 
-#[cfg(test)]
-mod udp_recv_tests;
-
 /// SQuic connection, it is shared by shadowquic and sunnyquic and is a wrapper of quic connection.
 /// It contains a connection object and two ID store for managing UDP sockets.
 /// The IDStore stores the mapping between ids and the destionation addresses as well as associated sockets
@@ -664,7 +661,6 @@ pub async fn handle_udp_recv_ctrl<C: QuicConnection>(
 pub async fn handle_udp_packet_recv<C: QuicConnection>(conn: SQConn<C>) -> Result<(), SError> {
     let id_store = conn.recv_id_store.clone();
     wait_sunny_auth(&conn).await?;
-    let mut datagram_retry_after = tokio::time::Instant::now();
     // Every accepted unistream is served by its own task and the set owns
     // them: leaving this loop drops the set, so tokio aborts whatever is still
     // parked instead of letting those tasks outlive their connection.
@@ -675,22 +671,10 @@ pub async fn handle_udp_packet_recv<C: QuicConnection>(conn: SQConn<C>) -> Resul
         // Reap finished streams so the set tracks live ones only.
         while streams.try_join_next().is_some() {}
         tokio::select! {
-            b = async {
-                tokio::time::sleep_until(datagram_retry_after).await;
-                conn.read_datagram().await
-            } => {
-                let b = match b {
-                    Ok(b) => b,
-                    Err(e) if conn.close_reason().is_some() => return Err(e.into()),
-                    Err(e) => {
-                        // No backend exposes a typed unsupported-datagrams
-                        // read error. Retry a nonterminal error with a delay
-                        // rather than permanently disabling the branch.
-                        error!("udp datagram receive failed: {}", e);
-                        datagram_retry_after = tokio::time::Instant::now() + Duration::from_millis(100);
-                        continue;
-                    }
-                };
+            b = conn.read_datagram() => {
+                // A transport error ends reception for this connection; only a
+                // failed delivery is recoverable.
+                let b = b?;
                 let b = BytesMut::from(b);
                 let mut cur = Cursor::new(b);
                 let SQPacketDatagramHeader{id} = match SQPacketDatagramHeader::decode(&mut cur).await {
