@@ -1,7 +1,5 @@
 //! RFC 9001 Initial protection; RFC 9369 QUIC v2. Bounded ClientHello assembly across datagrams.
-#[cfg(test)]
-use super::SniffResult;
-use super::tls;
+use super::{ParseState, ProtocolError, SniffProtocol, SniffResult, SnifferError, tls};
 use rustls_jls::quic::{Suite, Version};
 
 pub(super) fn suite() -> Option<Suite> {
@@ -58,15 +56,20 @@ impl<'a> Cursor<'a> {
 }
 
 #[cfg(test)]
-pub(super) fn parse(datagram: &[u8], limit: usize, suite: &Suite) -> Option<SniffResult> {
+pub(super) fn parse(
+    datagram: &[u8],
+    limit: usize,
+    suite: &Suite,
+) -> Result<SniffResult, ParseState> {
     match Parser::default().parse(datagram, limit, suite) {
-        tls::Parse::Done(result) => result,
-        tls::Parse::NeedMore => None,
+        ParseState::Done(Ok(result)) => Ok(result),
+        state => Err(state),
     }
 }
 
 #[derive(Default)]
 pub(super) struct Parser {
+    matched: bool,
     crypto: Vec<u8>,
     present: Vec<bool>,
     identity: Option<(u32, Vec<u8>)>,
@@ -75,25 +78,34 @@ pub(super) struct Parser {
     packets: usize,
 }
 impl Parser {
-    pub(super) fn parse(&mut self, datagram: &[u8], limit: usize, suite: &Suite) -> tls::Parse {
-        self.parse_inner(datagram, limit, suite)
-            .unwrap_or(tls::Parse::Done(None))
+    pub(super) fn parse(&mut self, datagram: &[u8], limit: usize, suite: &Suite) -> ParseState {
+        match self.parse_inner(datagram, limit, suite) {
+            Some(state) => state,
+            None if self.matched => ParseState::Done(Err(ProtocolError::Invalid {
+                protocol: SniffProtocol::Quic,
+                reason: "malformed or unauthenticated Initial packet",
+            })),
+            None => ParseState::Done(Err(ProtocolError::NoMatch)),
+        }
     }
     fn parse_inner(
         &mut self,
         mut datagram: &[u8],
         limit: usize,
         suite: &Suite,
-    ) -> Option<tls::Parse> {
+    ) -> Option<ParseState> {
         self.wire_bytes = self.wire_bytes.checked_add(datagram.len())?;
-        if datagram.is_empty() || self.wire_bytes > limit {
+        if datagram.is_empty() {
             return None;
+        }
+        if self.wire_bytes > limit {
+            return Some(ParseState::Error(SnifferError::Limit));
         }
         // Bound decryption work even for adversarial coalesced packets.
         while !datagram.is_empty() {
             self.packets += 1;
             if self.packets > 32 {
-                return None;
+                return Some(ParseState::Error(SnifferError::Limit));
             }
             let mut c = Cursor(datagram);
             let first = c.byte()?;
@@ -109,6 +121,7 @@ impl Parser {
             if (first >> 4) & 3 != initial_type {
                 return None;
             }
+            self.matched = true;
             let dcid_len = c.byte()? as usize;
             if dcid_len > 20 {
                 return None;
@@ -173,7 +186,7 @@ impl Parser {
                         let ranges = frames.varint()?;
                         frames.varint()?;
                         if ranges > 4096 {
-                            return None;
+                            return Some(ParseState::Error(SnifferError::Limit));
                         }
                         for _ in 0..ranges {
                             frames.varint()?;
@@ -190,12 +203,13 @@ impl Parser {
                         let len = frames.length()?;
                         let end = offset.checked_add(len)?;
                         if end > limit {
-                            return None;
+                            return Some(ParseState::Error(SnifferError::Limit));
                         }
                         let data = frames.take(len)?;
-                        if self.crypto.is_empty() {
-                            self.crypto = vec![0; limit];
-                            self.present = vec![false; limit];
+                        // Grow to the highest offset seen; `end <= limit` bounds it.
+                        if end > self.crypto.len() {
+                            self.crypto.resize(end, 0);
+                            self.present.resize(end, false);
                         }
                         for (i, byte) in (offset..end).zip(data) {
                             if self.present[i] && self.crypto[i] != *byte {
@@ -205,19 +219,45 @@ impl Parser {
                             self.present[i] = true;
                         }
                     }
+                    0x1c => {
+                        // A valid transport CONNECTION_CLOSE is not a malformed hello.
+                        frames.varint()?; // error code
+                        frames.varint()?; // frame type
+                        let reason_len = frames.length()?;
+                        frames.take(reason_len)?;
+                        return Some(ParseState::Done(Err(ProtocolError::NoHostname)));
+                    }
                     _ => return None,
                 }
             }
             if !frames.0.is_empty() {
-                return None;
+                return Some(ParseState::Error(SnifferError::Limit));
             }
             if self.present.get(..4).is_some_and(|p| p.iter().all(|b| *b)) {
-                let len = tls::handshake_len(&self.crypto, limit)?;
-                if self.present[..len].iter().all(|b| *b) {
-                    let mut result = tls::client_hello(&self.crypto[4..len])?;
-                    result.protocol = "quic";
-                    result.version = label.into();
-                    return Some(tls::Parse::Done(Some(result)));
+                let len = match tls::handshake_len(&self.crypto, limit) {
+                    Ok(len) => len,
+                    Err(ParseState::Done(Err(ProtocolError::NoMatch))) => {
+                        return Some(ParseState::Done(Err(ProtocolError::Invalid {
+                            protocol: SniffProtocol::Quic,
+                            reason: "expected ClientHello in Initial packet",
+                        })));
+                    }
+                    Err(result) => return Some(result),
+                };
+                if self
+                    .present
+                    .get(..len)
+                    .is_some_and(|p| p.iter().all(|b| *b))
+                {
+                    return Some(ParseState::Done(
+                        tls::client_hello(&self.crypto[4..len])
+                            .map(|hello| SniffResult {
+                                domain: hello.domain,
+                                protocol: SniffProtocol::Quic,
+                                version: label,
+                            })
+                            .map_err(|error| error.with_protocol(SniffProtocol::Quic)),
+                    ));
                 }
             }
             datagram = &datagram[packet_len..];
@@ -228,6 +268,6 @@ impl Parser {
                 break;
             }
         }
-        Some(tls::Parse::NeedMore)
+        Some(ParseState::NeedMore)
     }
 }

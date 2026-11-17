@@ -17,19 +17,6 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{Instrument, error, info, info_span};
 
-#[cfg(all(
-    feature = "jemalloc",
-    any(
-        target_os = "android",
-        all(
-            any(target_os = "linux", target_os = "macos"),
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        )
-    )
-))]
-#[global_allocator]
-static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 // jemalloc reads this before main, so profiling includes startup allocations.
 #[cfg(all(
     feature = "mem-profile",
@@ -116,19 +103,14 @@ impl ProxyRequest {
         }
     }
 
-    /// Only the destination-rewriting paths need this: Lua routing and TPROXY
-    /// fake-IP restore.
-    #[cfg(any(
-        test,
-        feature = "plugin",
-        all(feature = "dns-server", feature = "tproxy", target_os = "linux")
-    ))]
-    pub(crate) fn set_dst(&mut self, dst: SocksAddr) {
+    #[allow(dead_code)]
+    pub fn dst_mut(&mut self) -> &mut SocksAddr {
         match self {
-            ProxyRequest::Tcp(session) => session.dst = dst,
-            ProxyRequest::Udp(session) => session.dst = dst,
+            ProxyRequest::Tcp(TcpSession { dst, .. }) => dst,
+            ProxyRequest::Udp(UdpSession { dst, .. }) => dst,
         }
     }
+
     pub fn src_addr(&self) -> &Option<SocketAddr> {
         match self {
             ProxyRequest::Tcp(TcpSession { src_addr, .. }) => src_addr,
@@ -247,13 +229,15 @@ pub struct UserContext {
     /// Address of whoever opened the connection, when the inbound knows it.
     pub src_addr: Option<SocketAddr>,
     #[cfg(feature = "sniffer")]
-    pub sniffer: Option<utils::sniffer::SniffResult>,
+    pub sniffer: Option<plugin::sniffer::SniffResult>,
     pub inbound_tag: String,
     pub observer: Weak<Observer>,
     /// Outbound preference stamped by the accepting inbound on every request.
     /// A router script may honor or override it; without one it selects the
     /// outbound, and `None` falls back to the global default.
     pub preferred_outbound: Option<String>,
+    /// DNS strategy for this request, overriding the selected outbound's strategy.
+    pub dns_strategy: Option<config::DnsStrategy>,
     pub dns_query: Vec<DnsQuery>,
     pub stats: Option<StatsContext>,
     pub req_id: u32,
@@ -267,6 +251,7 @@ impl Default for UserContext {
             inbound_tag: Default::default(),
             observer: Weak::new(),
             preferred_outbound: None,
+            dns_strategy: None,
             dns_query: Vec::new(),
             stats: None,
             req_id: fetch_add_req_cnt(),
@@ -387,6 +372,7 @@ struct RequestDispatcher {
 }
 
 impl RequestDispatcher {
+    #[hotpath::measure(impl_type = "RequestDispatcher")]
     async fn dispatch(&self, mut req: ProxyRequest) {
         let preferred = &mut req.user_context_mut().preferred_outbound;
         if preferred.is_none() {
@@ -414,6 +400,7 @@ impl RequestDispatcher {
                     Ok(outbound_tag) => match context.destination() {
                         Ok(dst) => {
                             plugin::router::rewrite_dst(&mut req, dst);
+                            req.user_context_mut().dns_strategy = context.dns_strategy;
                             outbound_tag
                         }
                         Err(error) => {
@@ -585,6 +572,7 @@ impl Manager {
 }
 
 /// Own one listener's requests so they are cancelled before its shutdown hook runs.
+#[hotpath::measure]
 async fn run_inbound(
     tag: String,
     mut inbound: Box<dyn Inbound>,

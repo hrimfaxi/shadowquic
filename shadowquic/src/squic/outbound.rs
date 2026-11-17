@@ -110,6 +110,7 @@ pub async fn dispatch<C: QuicConnection>(
 /// stopped granting stream credit, so they stay inline for [`dispatch`] to bound.
 /// The relay itself is left to the caller, whose task is the one that owns the
 /// session and is aborted with it.
+#[hotpath::measure]
 pub async fn handle_request<C: QuicConnection>(
     req: ProxyRequest,
     conn: SQConn<C>,

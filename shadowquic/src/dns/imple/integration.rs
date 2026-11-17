@@ -50,7 +50,7 @@ impl Outbound for ResolvingOutbound {
     async fn handle(&self, req: ProxyRequest) -> Result<()> {
         let inner = self.inner.clone();
         let resolver = self.resolver.clone();
-        let strategy = self.strategy.clone();
+        let strategy = req.user_context().dns_strategy.unwrap_or(self.strategy);
         // The manager must remain free to route this resolver's upstream sessions.
 
         let req = match req {
@@ -96,7 +96,9 @@ impl UdpRecv for ResolvingRecv {
         let resolved = resolve_destination(&*self.resolver, &original, Some(&self.strategy))
             .await?
             .into();
-        remember(&self.mapping, &resolved, original)?;
+        if resolved != original {
+            remember(&self.mapping, &resolved, original)?;
+        }
         Ok((bytes, resolved))
     }
 }
@@ -170,7 +172,7 @@ impl Inbound for RestoringInbound {
     async fn accept(&mut self) -> Result<ProxyRequest> {
         let mut req = self.inner.accept().await?;
         let old_dst = req.dst().clone();
-        req.set_dst(self.fake.restore(req.dst())?);
+        *req.dst_mut() = self.fake.restore(req.dst())?;
         if &old_dst != req.dst() {
             tracing::trace!(
                 req_id = req.user_context().req_id,

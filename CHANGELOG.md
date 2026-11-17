@@ -5,6 +5,58 @@ Git tags and commits; dates are the dates of the tagged commits. Routine version
 bumps, formatting, and dependency updates are omitted unless they affect behavior.
 Version links compare each release with the preceding tag.
 
+## [0.4.12](https://github.com/spongebob888/shadowquic/compare/v0.4.11...v0.4.12) - 2026-11-16
+
+### Added
+
+- Manually triggered GitHub Actions builds with selectable target environments,
+  Cargo features, debug/release profiles, optimization levels, debug information,
+  and default-feature control. Downloadable artifacts include the binary, debug
+  symbols, and build settings.
+- A [custom build guide](document/custom-build.md) covering workflow options and
+  artifact downloads.
+
+### Fixed
+
+- Enable `prefer-post-quantum` for `aws-lc-rs` builds for mihomo compatibility.
+- Use the `cn` Geosite list in the TUN and TPROXY routing examples for Chinese
+  domain routing and DNS selection.
+
+## [0.4.11](https://github.com/spongebob888/shadowquic/compare/v0.4.10...v0.4.11) - 2026-11-15
+
+### Added
+
+- UDP destination rewriting in Lua routing, with original destination addresses
+  restored on replies.
+- Per-request DNS strategy overrides through `ctx.dns_strategy`, applying to TCP
+  and all datagrams in a UDP session and taking priority over outbound settings.
+- Optional `hotpath` and `hotpath-alloc` features for timing and allocation
+  profiling.
+
+### Changed
+
+- Move hostname sniffing into the plugin module; its log target is now
+  `shadowquic::plugin::sniffer`.
+- Distinguish malformed HTTP, TLS, and QUIC messages from unmatched traffic in
+  sniffer logs, with separate outcomes for timeouts, limits, and exhausted budgets.
+- Restrict nonblocking UDP sends to shared QUIC datagram dispatch, allowing
+  ordinary channel sends to wait for capacity.
+- Correct UDP throughput benchmark measurements.
+
+### Fixed
+
+- Release unused sniffer memory reservations after inspection, retaining only
+  the budget needed for buffered replay data.
+- Validate TLS ClientHello version extensions and report the highest recognized
+  advertised version without falling back when the extension is present.
+- Retry ephemeral DNS listener allocation when the TCP-selected port is
+  unavailable for UDP, including Windows exclusive-binding conflicts.
+- Avoid overwriting UDP DNS reply mappings for destinations already expressed
+  as IP addresses.
+- Generate request IDs when HTTP, SOCKS, or SQ inbound handlers run without an
+  existing tracing context, avoiding task-local access panics.
+- Declare the portable atomics dependency needed by performance binaries on MIPS.
+
 ## [0.4.10](https://github.com/spongebob888/shadowquic/compare/v0.4.9...v0.4.10) - 2026-11-08
 
 ### Added

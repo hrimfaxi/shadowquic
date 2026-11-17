@@ -9,6 +9,20 @@ use tokio::{
     sync::mpsc,
 };
 
+// Memory API tests explicitly select jemalloc as their host allocator.
+#[cfg(all(
+    feature = "jemalloc",
+    any(
+        target_os = "android",
+        all(
+            any(target_os = "linux", target_os = "macos"),
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )
+))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -1548,10 +1562,10 @@ async fn connections_sniffer_metadata_follows_receive_half_lifetime() {
         #[cfg(feature = "dns-server")]
         None,
     );
-    let metadata = crate::utils::sniffer::SniffResult {
+    let metadata = crate::plugin::sniffer::SniffResult {
         domain: "sniffed.example".into(),
-        protocol: "tls",
-        version: "1.3".into(),
+        protocol: crate::config::SniffProtocol::Tls,
+        version: "1.3",
     };
     let (mut request, _peer) = tcp_request(SocksAddr::from_domain("rewritten.example".into(), 443));
     request.user_context_mut().sniffer = Some(metadata.clone());
@@ -1588,9 +1602,9 @@ async fn connections_sniffer_metadata_follows_receive_half_lifetime() {
             dst,
             src_addr: None,
             user_context: crate::UserContext {
-                sniffer: Some(crate::utils::sniffer::SniffResult {
-                    protocol: "quic",
-                    version: "1".into(),
+                sniffer: Some(crate::plugin::sniffer::SniffResult {
+                    protocol: crate::config::SniffProtocol::Quic,
+                    version: "1",
                     ..metadata.clone()
                 }),
                 ..Default::default()

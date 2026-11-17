@@ -19,9 +19,6 @@ pub mod protect_socket;
 
 pub mod replay_stream;
 
-#[cfg(feature = "sniffer")]
-pub mod sniffer;
-
 #[cfg(test)]
 mod tests {
     use crate::error::SError;
