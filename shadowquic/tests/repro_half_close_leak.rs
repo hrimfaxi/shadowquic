@@ -492,7 +492,7 @@ async fn spawn_proxy(ports: &Ports) {
             over_stream: true,
             // The incident ran with keep-alive on, so the 30 s idle timer can never
             // end the stall on its own.
-            keep_alive_interval: 5000,
+            keep_alive_interval: 5000.into(),
             // Short, so the bound reclaims a leaked session inside the test's run.
             half_close_timeout: GRACE,
             ..Default::default()

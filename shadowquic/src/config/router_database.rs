@@ -8,6 +8,10 @@ pub fn default_geosite_url() -> String {
     "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml"
         .into()
 }
+
+pub fn default_cache_size() -> usize {
+    4 * 1024 * 1024
+}
 /// A routing database stored as a country MMDB or an indexed redb file.
 ///
 /// Example configuration:
@@ -51,26 +55,31 @@ pub fn default_geosite_url() -> String {
 pub enum RouterDatabaseCfg {
     Country(CountryDbCfg),
     Geosite(GeositeDbCfg),
+    Custom(CustomDbCfg),
 }
 
-/// Country IP database sourced from MMDB.
+/// Country/category IP database sourced from MMDB or binary `geoip.dat`.
+/// MMDB records may contain `country.iso_code`, a single string, or an array
+/// of string labels.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct CountryDbCfg {
     /// Unique tag, also used as the inbound tag of download connections.
     pub tag: String,
     /// HTTP(S) source URL. Used only when `path` does not exist.
-    /// Defaults to the MaxMind GeoLite2 Country database
-    /// MMDB format.
+    /// Defaults to the MaxMind GeoLite2 Country database in MMDB format.
+    /// The V2Ray/Xray protobuf `geoip.dat` is also accepted; the format is
+    /// detected from the contents, and it is always converted to redb.
     #[serde(default = "default_country_url")]
     pub url: String,
     /// Persistent file, relative to the working directory. A `.mmdb` suffix
     /// selects direct MMDB lookups; other suffixes retain redb conversion.
+    /// A `geoip.dat` source requires a non-`.mmdb` path.
     /// Cost about 3mb for mmdb file. Redb format not recommended for country database, as it is slower and larger.
     pub path: PathBuf,
 }
 
-/// Domain membership database sourced from geosite YAML.
+/// Domain membership database sourced from geosite YAML or binary `geosite.dat`.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct GeositeDbCfg {
@@ -78,6 +87,8 @@ pub struct GeositeDbCfg {
     pub tag: String,
     /// HTTP(S) source URL. Used only when `path` does not exist.
     /// Defaults to the v2fly domain-list-community database in YAML format.
+    /// The binary protobuf `geosite.dat` is also accepted; the format is detected
+    /// from the downloaded contents.
     #[serde(default = "default_geosite_url")]
     pub url: String,
     /// Base domain sets to import, matched case insensitively. Empty imports all sets.
@@ -86,9 +97,84 @@ pub struct GeositeDbCfg {
     /// Persistent converted redb file, relative to the working directory.
     /// Cost about 16m for full geosite db. 1Mb for only cn list.
     pub path: PathBuf,
+    /// redb page-cache budget in bytes. Defaults to 4 MiB; zero disables caching.
+    #[serde(default = "default_cache_size")]
+    pub cache_size: usize,
+}
+
+/// Persistent domain and IP lists defined in the router configuration.
+/// ```yaml
+/// router:
+///  database:
+///    - tag: local-rules
+///      type: custom
+///      path: data/custom.redb
+///      list:
+///        - name: direct
+///          rules:
+///            - 'domain:example.org'
+///            - 'keyword: needle:@ads'
+///            - 'regexp: ^service[0-9]+\.example$'
+///            - 'full:host.test'
+///            - 'ip:192.168.8.1/24'
+///            - 'ip:192.0.2.10'
+///            - 'ip:2001:db8::/64'
+///            - 'ip:2001:db8:1::1'
+/// ```
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct CustomDbCfg {
+    pub tag: String,
+    #[serde(default = "default_custom_path")]
+    pub path: PathBuf,
+
+    pub list: Vec<CustomRuleList>,
+    /// redb page-cache budget in bytes. Defaults to 128 KiB. Zero disables caching.
+    #[serde(default = "default_custom_cache_size")]
+    pub cache_size: usize,
+}
+
+pub fn default_custom_cache_size() -> usize {
+    128 * 1024
+}
+
+pub fn default_custom_path() -> PathBuf {
+    "data/custom.redb".into()
+}
+
+/// support rules:
+///   - 'domain:example.org'
+///   - 'keyword: needle:@ads'
+///   - 'regexp: ^service[0-9]+\.example$'
+///   - 'full:host.test'
+///   - 'ip:192.168.8.1/24'
+///   - 'ip:192.0.2.10'
+///   - 'ip:2001:db8::/64'
+///   - 'ip:2001:db8:1::1'
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct CustomRuleList {
+    pub name: String,
+    /// Replace the list's tables at startup. When false, only seed missing tables.
+    #[serde(default = "default_force")]
+    pub force: bool,
+    pub rules: Vec<String>,
+}
+
+pub fn default_force() -> bool {
+    true
 }
 
 impl RouterDatabaseCfg {
+    #[cfg(any(test, feature = "router-db"))]
+    pub(crate) fn cache_size(&self) -> usize {
+        match self {
+            Self::Country(_) => default_cache_size(),
+            Self::Custom(cfg) => cfg.cache_size,
+            Self::Geosite(cfg) => cfg.cache_size,
+        }
+    }
+
     #[cfg(any(test, feature = "router-db"))]
     pub(crate) fn uses_mmdb(&self) -> bool {
         self.kind() == RouterDBKind::Country
@@ -102,13 +188,16 @@ impl RouterDatabaseCfg {
         match self {
             Self::Country(cfg) => &cfg.tag,
             Self::Geosite(cfg) => &cfg.tag,
+            Self::Custom(cfg) => &cfg.tag,
         }
     }
 
+    /// Download source, or an empty string for inline custom databases.
     pub fn url(&self) -> &str {
         match self {
             Self::Country(cfg) => &cfg.url,
             Self::Geosite(cfg) => &cfg.url,
+            Self::Custom(_) => "",
         }
     }
 
@@ -116,6 +205,7 @@ impl RouterDatabaseCfg {
         match self {
             Self::Country(cfg) => &cfg.path,
             Self::Geosite(cfg) => &cfg.path,
+            Self::Custom(cfg) => &cfg.path,
         }
     }
 
@@ -123,6 +213,7 @@ impl RouterDatabaseCfg {
         match self {
             Self::Country(_) => RouterDBKind::Country,
             Self::Geosite(_) => RouterDBKind::Geosite,
+            Self::Custom(_) => RouterDBKind::Custom,
         }
     }
 }
@@ -132,11 +223,70 @@ impl RouterDatabaseCfg {
 pub enum RouterDBKind {
     Country,
     Geosite,
+    Custom,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geosite_cache_size_defaults_and_round_trips_in_bytes() {
+        for (field, expected) in [
+            ("", 4 * 1024 * 1024),
+            ("cache-size: 0", 0),
+            ("cache-size: 16777216", 16 * 1024 * 1024),
+        ] {
+            let cfg: RouterDatabaseCfg = serde_saphyr::from_str(&format!(
+                "type: geosite\ntag: db\npath: db.redb\n{field}\n"
+            ))
+            .unwrap();
+            assert_eq!(cfg.cache_size(), expected);
+            let encoded = serde_saphyr::to_string(&cfg).unwrap();
+            let RouterDatabaseCfg::Geosite(decoded) =
+                serde_saphyr::from_str::<RouterDatabaseCfg>(&encoded).unwrap()
+            else {
+                unreachable!()
+            };
+            assert_eq!(decoded.cache_size, expected);
+            assert!(encoded.contains(&format!("cache-size: {expected}")));
+        }
+        for value in ["-1", "1.5", "8MiB"] {
+            assert!(
+                serde_saphyr::from_str::<RouterDatabaseCfg>(&format!(
+                    "type: geosite\ntag: db\npath: db.redb\ncache-size: {value}\n"
+                ))
+                .is_err()
+            );
+        }
+        let country: RouterDatabaseCfg =
+            serde_saphyr::from_str("type: country\ntag: db\npath: db.redb\n").unwrap();
+        assert_eq!(country.cache_size(), 4 * 1024 * 1024);
+        assert!(
+            serde_saphyr::from_str::<RouterDatabaseCfg>(
+                "type: country\ntag: db\npath: db.redb\ncache-size: 1024\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn custom_cache_size_defaults_and_round_trips_in_bytes() {
+        for (field, expected) in [
+            ("", 128 * 1024),
+            ("cache-size: 0", 0),
+            ("cache-size: 65536", 65536),
+        ] {
+            let cfg: RouterDatabaseCfg =
+                serde_saphyr::from_str(&format!("type: custom\ntag: local\nlist: []\n{field}\n"))
+                    .unwrap();
+            assert_eq!(cfg.cache_size(), expected);
+            let encoded = serde_saphyr::to_string(&cfg).unwrap();
+            assert!(encoded.contains(&format!("cache-size: {expected}")));
+            let decoded: RouterDatabaseCfg = serde_saphyr::from_str(&encoded).unwrap();
+            assert_eq!(decoded.cache_size(), expected);
+        }
+    }
 
     #[test]
     fn geosite_list_defaults_and_round_trips() {

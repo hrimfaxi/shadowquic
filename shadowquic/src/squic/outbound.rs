@@ -1,9 +1,12 @@
 use bytes::Bytes;
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
+
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::task::JoinSet;
 
 use tokio::io::AsyncReadExt;
 use tracing::Instrument;
@@ -100,6 +103,19 @@ pub async fn dispatch<C: QuicConnection>(
                 Ok(Dispatch::StillActive)
             }
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct SQClientConn<C: QuicConnection> {
+    pub sq_conn: SQConn<C>,
+    pub bg_task: Arc<JoinSet<SResult<()>>>,
+}
+impl<T: QuicConnection> Deref for SQClientConn<T> {
+    type Target = SQConn<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sq_conn
     }
 }
 

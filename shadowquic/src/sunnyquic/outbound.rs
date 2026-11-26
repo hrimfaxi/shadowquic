@@ -13,14 +13,18 @@ use crate::{
     error::SError,
     msgs::squic::{SQExtError, UserStats},
     quic::{QuicClient, QuicConnection},
-    squic::{auth_sunny, inbound::UserManager, outbound},
+    squic::{
+        auth_sunny,
+        inbound::UserManager,
+        outbound::{self, SQClientConn},
+    },
     sunnyquic::gen_sunny_user_hash,
     utils::socket_opt::{SocketFactory, UdpSocketFactory},
 };
 
 use crate::squic::{SQConn, handle_udp_packet_recv};
 
-pub type SunnyQuicConn = SQConn<<EndClient as QuicClient>::C>;
+pub type SunnyQuicConn = SQClientConn<<EndClient as QuicClient>::C>;
 
 pub struct SunnyQuicClient {
     pub quic_conn: Mutex<Option<SunnyQuicConn>>,
@@ -98,7 +102,10 @@ impl SunnyQuicClient {
             }
             .in_current_span(),
         );
-        Ok(conn)
+        Ok(SQClientConn {
+            sq_conn: conn,
+            bg_task: Default::default(),
+        })
     }
     async fn prepare_conn(&self) -> Result<SunnyQuicConn, SError> {
         // Serialize cache refreshes so concurrent requests reuse one connection.
@@ -212,7 +219,14 @@ impl Outbound for SunnyQuicClient {
             .map_err(std::io::Error::from)??;
 
         let over_stream = self.config.over_stream;
-        match outbound::dispatch(req, conn, over_stream, self.config.half_close_timeout).await? {
+        match outbound::dispatch(
+            req,
+            conn.sq_conn,
+            over_stream,
+            self.config.half_close_timeout,
+        )
+        .await?
+        {
             // The relay runs here, in the task that accepted the request, so the
             // session ends when this task is aborted with its inbound.
             outbound::Dispatch::Sent(relay) => relay.await,

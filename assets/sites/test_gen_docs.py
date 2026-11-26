@@ -113,6 +113,63 @@ class TunDocsTests(unittest.TestCase):
                     self.assertIn("*(optional)*", section)
 
 
+class DurationDocsTests(unittest.TestCase):
+    def test_duration_newtype_has_a_linked_page_and_yaml_default(self):
+        def item(id, name, inner, **kwargs):
+            return Item(dict(id=id, name=name, inner=inner,
+                             span=dict(filename="shadowquic/src/config/shadowquic.rs"), **kwargs))
+
+        config = item(0, "Config", {"struct": {"kind": {"plain": {"fields": [3]}}}})
+        hopping = item(4, "PortHoppingCfg", {"struct": {"kind": {"plain": {"fields": [5]}}}})
+        duration = item(6, "DurationMs", {"struct": {"kind": {"tuple": [None]}}},
+                        docs="A whole-number duration. Bare values use milliseconds.")
+        items = [
+            config,
+            item(1, "InboundCfg", {"enum": {"variants": []}}),
+            item(2, "OutboundCfg", {"enum": {"variants": []}}),
+            item(3, "port_hopping", {"struct_field": {"resolved_path": {"id": 4}}}),
+            hopping,
+            item(5, "interval", {"struct_field": {"resolved_path": {"id": 6, "path": "DurationMs"}}}),
+            duration,
+        ]
+        index = {it.id: it for it in items}
+        attrs = parse_source_attrs(REPO_ROOT)
+        pages = plan_pages(index, attrs)
+        paths = {p.item_id: p.rel_path for p in pages}
+        ctx = RenderContext(index, paths, collect_default_fn_values(REPO_ROOT), {}, attrs)
+
+        rendered = emit_struct_page(hopping, Path(paths[4]), "Port hopping", ctx)
+        self.assertIn("[`DurationMs`](durationms.md)", rendered)
+        self.assertIn("- **Default:** `120000`", rendered)
+
+        rendered = emit_struct_page(duration, Path(paths[6]), "Duration", ctx)
+        self.assertIn("Bare values use milliseconds.", rendered)
+        self.assertNotIn("## Fields", rendered)
+
+
+class GeositeDocsTests(unittest.TestCase):
+    def test_geosite_url_default_is_rendered_from_wrapped_expression(self):
+        filename = "shadowquic/src/config/router_database.rs"
+        config = Item(dict(
+            id=0, name="GeositeDbCfg", span=dict(filename=filename),
+            inner={"struct": {"kind": {"plain": {"fields": [1]}}}},
+        ))
+        url = Item(dict(
+            id=1, name="url", span=dict(filename=filename),
+            inner={"struct_field": {"resolved_path": {"path": "String"}}},
+        ))
+        ctx = RenderContext(
+            index={item.id: item for item in (config, url)}, page_for_type={}, pages_dir_for={},
+            default_values=collect_default_fn_values(REPO_ROOT),
+            src_attrs=parse_source_attrs(REPO_ROOT),
+        )
+        rendered = emit_struct_page(config, Path("configuration/shared/geositedbcfg.md"), "Geosite DB", ctx)
+        self.assertIn(
+            "- **Default:** `https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml`",
+            rendered,
+        )
+
+
 class RestApiDocsTests(unittest.TestCase):
     def test_dashboard_defaults_are_rendered_from_public_helpers(self):
         filename = "shadowquic/src/config/mod.rs"

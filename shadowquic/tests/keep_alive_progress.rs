@@ -85,7 +85,7 @@ fn client(server_addr: SocketAddr, keep_alive_interval: u32) -> ShadowQuicClient
             zero_rtt: false,
             initial_mtu: 1200,
             congestion_control: CongestionControl::Bbr,
-            keep_alive_interval,
+            keep_alive_interval: u64::from(keep_alive_interval).into(),
             ..Default::default()
         },
         std::sync::Arc::new(shadowquic::dns::ResolverManager::new()),

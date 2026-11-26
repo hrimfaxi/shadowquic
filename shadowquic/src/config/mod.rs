@@ -65,7 +65,9 @@ pub use sniffer::{SniffProtocol, SnifferCfg, SnifferRule};
 mod router;
 mod router_database;
 pub use router::RouterCfg;
-pub use router_database::{CountryDbCfg, GeositeDbCfg, RouterDBKind, RouterDatabaseCfg};
+pub use router_database::{
+    CountryDbCfg, CustomDbCfg, CustomRuleList, GeositeDbCfg, RouterDBKind, RouterDatabaseCfg,
+};
 
 /// Overall configuration of shadowquic.
 ///
@@ -439,6 +441,8 @@ impl Config {
         #[cfg(feature = "router-db")]
         let databases =
             crate::plugin::database::Databases::build(&self.router.database, &mut inbounds)?;
+        #[cfg(all(feature = "router-db", feature = "restful-api"))]
+        let custom_databases = databases.custom.clone();
         #[cfg(feature = "plugin")]
         let router = self
             .router
@@ -570,6 +574,8 @@ impl Config {
             default_outbound,
             #[cfg(feature = "restful-api")]
             api_config: self.restful_api,
+            #[cfg(all(feature = "router-db", feature = "restful-api"))]
+            custom_databases,
             #[cfg(feature = "restful-api")]
             sq_outbounds,
             #[cfg(feature = "plugin")]
@@ -1014,8 +1020,8 @@ pub fn default_over_stream() -> bool {
 pub fn default_alpn() -> Vec<String> {
     vec!["h3".into()]
 }
-pub fn default_keep_alive_interval() -> u32 {
-    0
+pub fn default_keep_alive_interval() -> DurationMs {
+    0.into()
 }
 
 /// Default user-store flush interval in seconds
@@ -1178,6 +1184,17 @@ impl Default for DirectOutCfg {
     }
 }
 
+pub fn default_port_hopping_interval() -> DurationMs<1000> {
+    120_000.into()
+}
+
+pub fn default_port_hopping_jitter() -> DurationMs {
+    30_000.into()
+}
+
+pub fn default_port_hopping_enable() -> bool {
+    false
+}
 /// Outbound that discards every request.
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]

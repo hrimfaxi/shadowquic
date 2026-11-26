@@ -142,7 +142,7 @@ async fn proxy_pair(client_grace: u64, server_grace: u64) -> Proxy {
             zero_rtt: false,
             initial_mtu: 1200,
             congestion_control: CongestionControl::Bbr,
-            keep_alive_interval: 0,
+            keep_alive_interval: 0.into(),
             half_close_timeout: client_grace,
             ..Default::default()
         },
